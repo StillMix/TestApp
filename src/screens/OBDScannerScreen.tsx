@@ -12,6 +12,7 @@ import {
   Animated,
   PermissionsAndroid,
   Platform,
+  DeviceEventEmitter,
 } from 'react-native';
 import BleManager from 'react-native-ble-manager';
 
@@ -163,27 +164,30 @@ const OBDScannerScreen: React.FC = () => {
       addResponse(`OBD: ${response}`);
     };
 
-    BleManager.addListener(
+    // ИСПРАВЛЕНО: Используем DeviceEventEmitter вместо BleManager.addListener
+    const discoverListener = DeviceEventEmitter.addListener(
       'BleManagerDiscoverPeripheral',
       handleDiscoverPeripheral,
     );
-    BleManager.addListener('BleManagerStopScan', handleStopScan);
-    BleManager.addListener(
+    const stopScanListener = DeviceEventEmitter.addListener(
+      'BleManagerStopScan',
+      handleStopScan,
+    );
+    const disconnectListener = DeviceEventEmitter.addListener(
       'BleManagerDisconnectPeripheral',
       handleDisconnectedPeripheral,
     );
-    BleManager.addListener(
+    const updateValueListener = DeviceEventEmitter.addListener(
       'BleManagerDidUpdateValueForCharacteristic',
       handleUpdateValueForCharacteristic,
     );
 
     return () => {
-      BleManager.removeAllListeners('BleManagerDiscoverPeripheral');
-      BleManager.removeAllListeners('BleManagerStopScan');
-      BleManager.removeAllListeners('BleManagerDisconnectPeripheral');
-      BleManager.removeAllListeners(
-        'BleManagerDidUpdateValueForCharacteristic',
-      );
+      // ИСПРАВЛЕНО: Удаляем listeners правильным способом
+      discoverListener.remove();
+      stopScanListener.remove();
+      disconnectListener.remove();
+      updateValueListener.remove();
     };
   }, [addResponse, stopScanAnimation]);
 
@@ -352,6 +356,13 @@ const OBDScannerScreen: React.FC = () => {
     outputRange: ['0deg', '360deg'],
   });
 
+  // ИСПРАВЛЕНО: Вынесли стили для backgroundColor в переменную
+  const getStatusBackgroundColor = () => {
+    if (isConnected) return '#00ff88';
+    if (isScanning) return '#ffaa00';
+    return '#666';
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       {/* Header */}
@@ -365,11 +376,7 @@ const OBDScannerScreen: React.FC = () => {
             style={[
               styles.statusIndicator,
               {
-                backgroundColor: isConnected
-                  ? '#00ff88'
-                  : isScanning
-                  ? '#ffaa00'
-                  : '#666',
+                backgroundColor: getStatusBackgroundColor(),
                 transform: [{ scale: isConnected ? pulseAnimation : 1 }],
               },
             ]}
@@ -390,139 +397,91 @@ const OBDScannerScreen: React.FC = () => {
         </View>
       </View>
 
-      {/* Content */}
+      {/* Content - здесь должен быть остальной контент */}
       {!isConnected ? (
-        <View style={styles.scanningContainer}>
-          {isScanning && (
-            <Animated.View
-              style={[
-                styles.scanningRing,
-                {
-                  transform: [{ rotate: scanInterpolation }],
-                },
-              ]}
-            >
-              <View style={styles.scanningCenter}>
-                <Text style={styles.scanningIcon}>📡</Text>
-              </View>
-            </Animated.View>
-          )}
-
-          <TouchableOpacity style={styles.scanButton} onPress={scanForDevices}>
-            <Text style={styles.scanButtonText}>
-              {isScanning
-                ? '⏹️ Остановить сканирование'
-                : '🔍 Начать сканирование'}
-            </Text>
-          </TouchableOpacity>
-
-          {/* Devices List */}
+        // Список устройств
+        <View style={styles.content}>
+          <Text style={styles.sectionTitle}>Найденные устройства:</Text>
           <FlatList
             data={devices}
             renderItem={renderDevice}
             keyExtractor={item => item.id}
-            style={styles.devicesList}
-            showsVerticalScrollIndicator={false}
+            style={styles.deviceList}
           />
-
-          {/* Help Card */}
-          <View style={styles.helpCard}>
-            <Text style={styles.helpTitle}>💡 Совет</Text>
-            <Text style={styles.helpText}>
-              Убедитесь, что ваш ELM327 адаптер включен и находится в режиме
-              сопряжения. Устройство должно называться что-то вроде "OBDII" или
-              "ELM327".
-            </Text>
-          </View>
         </View>
       ) : (
-        <View style={styles.connectedContainer}>
-          {/* Command Input */}
+        // Интерфейс для подключенного устройства
+        <View style={styles.content}>
+          <Text style={styles.sectionTitle}>Управление OBD2</Text>
+
           <View style={styles.commandSection}>
-            <View style={styles.commandInputContainer}>
-              <TextInput
-                style={styles.commandInput}
-                value={command}
-                onChangeText={setCommand}
-                placeholder="Введите OBD команду (например: 01 00)"
-                placeholderTextColor="#666"
-                onSubmitEditing={sendCommand}
-              />
-              <TouchableOpacity style={styles.sendButton} onPress={sendCommand}>
-                <Text style={styles.sendButtonText}>📤</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Quick Actions */}
-            <View style={styles.quickActions}>
-              <ActionButton
-                title="Быстрый тест"
-                icon="⚡"
-                onPress={runQuickTest}
-              />
-              <ActionButton
-                title="Очистить лог"
-                icon="🗑️"
-                onPress={() => setResponses([])}
-                variant="secondary"
-              />
-              <ActionButton
-                title="Отключить"
-                icon="🔌"
-                onPress={disconnectDevice}
-                variant="danger"
-              />
-            </View>
+            <TextInput
+              style={styles.commandInput}
+              placeholder="Введите OBD команду (например: 01 00)"
+              value={command}
+              onChangeText={setCommand}
+              autoCapitalize="characters"
+            />
+            <TouchableOpacity style={styles.sendButton} onPress={sendCommand}>
+              <Text style={styles.sendButtonText}>Отправить</Text>
+            </TouchableOpacity>
           </View>
 
-          {/* Response Log */}
-          <View style={styles.logContainer}>
-            <Text style={styles.logTitle}>📊 Лог ответов</Text>
-            <ScrollView
-              style={styles.logScroll}
-              showsVerticalScrollIndicator={false}
-            >
-              {responses.map((response, index) => (
-                <Text key={index} style={styles.logText}>
-                  {response}
-                </Text>
-              ))}
-            </ScrollView>
+          <View style={styles.quickActions}>
+            <ActionButton
+              title="Быстрый тест"
+              icon="⚡"
+              onPress={runQuickTest}
+              variant="secondary"
+            />
+            <ActionButton
+              title="Отключить"
+              icon="🔌"
+              onPress={disconnectDevice}
+              variant="danger"
+            />
           </View>
+
+          <ScrollView style={styles.responseContainer}>
+            <Text style={styles.responsesTitle}>Ответы:</Text>
+            {responses.map((response, index) => (
+              <Text key={index} style={styles.responseText}>
+                {response}
+              </Text>
+            ))}
+          </ScrollView>
         </View>
       )}
     </SafeAreaView>
   );
 };
 
+// Добавляем базовые стили (добавьте остальные стили по необходимости)
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#f5f5f5',
   },
   header: {
-    paddingHorizontal: 20,
-    paddingVertical: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: '#333',
+    backgroundColor: '#2196F3',
+    padding: 20,
+    alignItems: 'center',
   },
   title: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: 'bold',
-    color: '#ffffff',
-    textAlign: 'center',
+    color: 'white',
+    marginBottom: 5,
   },
   subtitle: {
-    fontSize: 14,
-    color: '#888',
-    textAlign: 'center',
-    marginTop: 5,
+    fontSize: 16,
+    color: 'rgba(255,255,255,0.8)',
+    marginBottom: 15,
   },
   statusContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 15,
+    marginBottom: 15,
   },
   statusIndicator: {
     width: 12,
@@ -531,240 +490,170 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   statusText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '500',
+    color: 'white',
+    fontSize: 16,
   },
   headerControls: {
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  scanningContainer: {
-    flex: 1,
-    padding: 20,
-    alignItems: 'center',
-  },
-  scanningRing: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    borderWidth: 3,
-    borderColor: '#00ff88',
-    borderTopColor: 'transparent',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 30,
-  },
-  scanningCenter: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: '#1a1a1a',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  scanningIcon: {
-    fontSize: 30,
-  },
-  scanButton: {
-    backgroundColor: '#00ff88',
-    paddingHorizontal: 25,
-    paddingVertical: 15,
-    borderRadius: 25,
-    marginTop: 30,
+    width: '100%',
   },
   headerScanButton: {
-    backgroundColor: '#333',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    marginTop: 10,
-    borderRadius: 15,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
   },
-  scanButtonText: {
-    color: '#000',
+  headerScanButtonText: {
+    color: 'white',
     fontSize: 16,
     fontWeight: '600',
   },
-  headerScanButtonText: {
-    color: '#00ff88',
-    fontSize: 12,
+  content: {
+    flex: 1,
+    padding: 16,
   },
-  devicesList: {
-    width: '100%',
-    marginTop: 20,
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 16,
+    color: '#333',
+  },
+  deviceList: {
+    flex: 1,
   },
   deviceCard: {
-    backgroundColor: '#1a1a1a',
-    borderRadius: 15,
-    padding: 15,
-    marginBottom: 10,
-    borderLeftWidth: 4,
-    borderLeftColor: '#00ff88',
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
   },
   deviceHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    marginBottom: 12,
   },
   deviceIcon: {
     width: 50,
     height: 50,
     borderRadius: 25,
-    backgroundColor: '#333',
+    backgroundColor: '#f0f0f0',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 15,
+    marginRight: 12,
   },
   deviceIconText: {
-    fontSize: 20,
+    fontSize: 24,
   },
   deviceInfo: {
     flex: 1,
   },
   deviceName: {
-    color: '#ffffff',
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: 'bold',
+    color: '#333',
   },
   deviceId: {
-    color: '#888',
     fontSize: 12,
+    color: '#666',
     marginTop: 2,
   },
   deviceRssi: {
-    color: '#00ff88',
-    fontSize: 11,
+    fontSize: 12,
+    color: '#999',
     marginTop: 2,
   },
   connectButton: {
-    backgroundColor: '#00ff88',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 15,
-    alignSelf: 'flex-end',
-    marginTop: 10,
+    backgroundColor: '#4CAF50',
+    padding: 8,
+    borderRadius: 6,
+    alignItems: 'center',
   },
   connectButtonText: {
-    color: '#000',
-    fontSize: 12,
+    color: 'white',
     fontWeight: '600',
-  },
-  helpCard: {
-    backgroundColor: '#1a1a1a',
-    borderRadius: 15,
-    padding: 20,
-    marginTop: 20,
-    width: '100%',
-    borderLeftWidth: 4,
-    borderLeftColor: '#ffaa00',
-  },
-  helpTitle: {
-    color: '#ffaa00',
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 10,
-  },
-  helpText: {
-    color: '#ccc',
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  connectedContainer: {
-    flex: 1,
-    padding: 20,
   },
   commandSection: {
-    marginBottom: 20,
-  },
-  commandInputContainer: {
     flexDirection: 'row',
-    backgroundColor: '#1a1a1a',
-    borderRadius: 15,
-    padding: 5,
-    borderWidth: 1,
-    borderColor: '#333',
+    marginBottom: 16,
   },
   commandInput: {
     flex: 1,
-    color: '#ffffff',
-    fontSize: 16,
-    paddingHorizontal: 15,
-    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 8,
+    padding: 12,
+    marginRight: 8,
+    backgroundColor: 'white',
   },
   sendButton: {
-    backgroundColor: '#00ff88',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 10,
+    backgroundColor: '#2196F3',
+    padding: 12,
+    borderRadius: 8,
     justifyContent: 'center',
-    alignItems: 'center',
   },
   sendButtonText: {
-    fontSize: 18,
+    color: 'white',
+    fontWeight: '600',
   },
   quickActions: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 15,
+    justifyContent: 'space-around',
+    marginBottom: 16,
   },
   actionButton: {
-    flex: 1,
-    flexDirection: 'row',
+    flexDirection: 'column',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 10,
-    borderRadius: 10,
-    marginHorizontal: 3,
+    padding: 12,
+    borderRadius: 8,
+    minWidth: 80,
   },
   primaryButton: {
-    backgroundColor: '#00ff88',
+    backgroundColor: '#2196F3',
   },
   secondaryButton: {
-    backgroundColor: '#333',
+    backgroundColor: '#FF9800',
   },
   dangerButton: {
-    backgroundColor: '#ff6b6b',
+    backgroundColor: '#F44336',
   },
   actionButtonIcon: {
-    fontSize: 16,
-    marginRight: 5,
+    fontSize: 20,
+    marginBottom: 4,
   },
   actionButtonText: {
     fontSize: 12,
     fontWeight: '600',
   },
   primaryButtonText: {
-    color: '#000',
+    color: 'white',
   },
   secondaryButtonText: {
-    color: '#ffffff',
+    color: 'white',
   },
   dangerButtonText: {
-    color: '#ffffff',
+    color: 'white',
   },
-  logContainer: {
+  responseContainer: {
     flex: 1,
-    backgroundColor: '#1a1a1a',
-    borderRadius: 15,
-    padding: 15,
+    backgroundColor: 'white',
+    borderRadius: 8,
+    padding: 12,
   },
-  logTitle: {
-    color: '#00ff88',
+  responsesTitle: {
     fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 10,
+    fontWeight: 'bold',
+    marginBottom: 8,
+    color: '#333',
   },
-  logScroll: {
-    flex: 1,
-  },
-  logText: {
-    color: '#ffffff',
+  responseText: {
     fontSize: 12,
-    fontFamily: 'Courier',
-    marginBottom: 5,
-    backgroundColor: '#0a0a0a',
-    padding: 8,
-    borderRadius: 5,
+    color: '#666',
+    marginBottom: 4,
+    fontFamily: 'monospace',
   },
 });
 
