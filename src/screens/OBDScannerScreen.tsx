@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  SafeAreaView,
   View,
   Text,
   TouchableOpacity,
@@ -8,12 +7,13 @@ import {
   StyleSheet,
   Alert,
   TextInput,
-  ScrollView,
   Animated,
   PermissionsAndroid,
   Platform,
   DeviceEventEmitter,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import BleManager from 'react-native-ble-manager';
 
 interface BluetoothDevice {
@@ -96,7 +96,7 @@ const OBDScannerScreen: React.FC = () => {
       Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnimation, {
-            toValue: 1.1,
+            toValue: 1.2,
             duration: 1000,
             useNativeDriver: true,
           }),
@@ -109,208 +109,125 @@ const OBDScannerScreen: React.FC = () => {
       ).start();
     };
 
-    startPulseAnimation();
-  }, [pulseAnimation]);
+    if (isConnected) {
+      startPulseAnimation();
+    } else {
+      pulseAnimation.setValue(1);
+    }
+  }, [isConnected, pulseAnimation]);
 
-  const addResponse = useCallback((response: string) => {
-    setResponses(prev => [
-      ...prev.slice(-50), // Последние 50 сообщений
-      `${new Date().toLocaleTimeString()}: ${response}`,
-    ]);
+  // Инициализация BLE
+  useEffect(() => {
+    initializeBLE();
+    return () => {
+      BleManager.stopScan();
+    };
   }, []);
 
-  // Инициализация BLE Manager
-  useEffect(() => {
-    BleManager.start({ showAlert: false });
+  const initializeBLE = async () => {
+    try {
+      await BleManager.start({ showAlert: false });
+      console.log('BLE Manager инициализирован');
 
-    const handleDiscoverPeripheral = (peripheral: any) => {
-      if (peripheral.name && peripheral.name.includes('OBDII')) {
-        setDevices(prevDevices => {
-          const existingDevice = prevDevices.find(d => d.id === peripheral.id);
-          if (existingDevice) {
-            return prevDevices.map(d =>
-              d.id === peripheral.id ? { ...d, rssi: peripheral.rssi } : d,
-            );
-          }
-          return [
-            ...prevDevices,
-            {
-              id: peripheral.id,
-              name: peripheral.name,
-              rssi: peripheral.rssi,
-            },
-          ];
-        });
+      if (Platform.OS === 'android') {
+        await requestBluetoothPermissions();
       }
-    };
-
-    const handleStopScan = () => {
-      console.log('Сканирование остановлено');
-      setIsScanning(false);
-      stopScanAnimation();
-    };
-
-    const handleDisconnectedPeripheral = (data: any) => {
-      console.log('Устройство отключено', data);
-      setConnectedDevice(null);
-      setIsConnected(false);
-      setStatus('Отключено');
-      addResponse('Устройство отключено');
-    };
-
-    const handleUpdateValueForCharacteristic = (data: any) => {
-      const response = String.fromCharCode.apply(null, Array.from(data.value));
-      console.log('Получен ответ:', response);
-      addResponse(`OBD: ${response}`);
-    };
-
-    // ИСПРАВЛЕНО: Используем DeviceEventEmitter вместо BleManager.addListener
-    const discoverListener = DeviceEventEmitter.addListener(
-      'BleManagerDiscoverPeripheral',
-      handleDiscoverPeripheral,
-    );
-    const stopScanListener = DeviceEventEmitter.addListener(
-      'BleManagerStopScan',
-      handleStopScan,
-    );
-    const disconnectListener = DeviceEventEmitter.addListener(
-      'BleManagerDisconnectPeripheral',
-      handleDisconnectedPeripheral,
-    );
-    const updateValueListener = DeviceEventEmitter.addListener(
-      'BleManagerDidUpdateValueForCharacteristic',
-      handleUpdateValueForCharacteristic,
-    );
-
-    return () => {
-      // ИСПРАВЛЕНО: Удаляем listeners правильным способом
-      discoverListener.remove();
-      stopScanListener.remove();
-      disconnectListener.remove();
-      updateValueListener.remove();
-    };
-  }, [addResponse, stopScanAnimation]);
-
-  // Запрос разрешений для Android
-  const requestPermissions = async () => {
-    if (Platform.OS === 'android') {
-      const granted = await PermissionsAndroid.requestMultiple([
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-      ]);
-
-      if (
-        granted['android.permission.BLUETOOTH_SCAN'] ===
-          PermissionsAndroid.RESULTS.GRANTED &&
-        granted['android.permission.BLUETOOTH_CONNECT'] ===
-          PermissionsAndroid.RESULTS.GRANTED &&
-        granted['android.permission.ACCESS_FINE_LOCATION'] ===
-          PermissionsAndroid.RESULTS.GRANTED
-      ) {
-        console.log('Разрешения получены');
-        return true;
-      } else {
-        console.log('Разрешения не получены');
-        return false;
-      }
+    } catch (error) {
+      console.error('Ошибка инициализации BLE:', error);
+      setStatus('Ошибка инициализации Bluetooth');
     }
-    return true;
   };
 
-  // Сканирование устройств
-  const scanForDevices = async () => {
+  const requestBluetoothPermissions = async () => {
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.requestMultiple([
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        ]);
+        console.log('Разрешения получены:', granted);
+      } catch (error) {
+        console.error('Ошибка получения разрешений:', error);
+      }
+    }
+  };
+
+  const startScan = async () => {
     if (isScanning) {
-      BleManager.stopScan();
+      stopScan();
       return;
     }
-
-    const hasPermissions = await requestPermissions();
-    if (!hasPermissions) {
-      Alert.alert('Ошибка', 'Необходимые разрешения не предоставлены');
-      return;
-    }
-
-    setDevices([]);
-    setStatus('Сканирование...');
-    setIsScanning(true);
-    startScanAnimation();
 
     try {
-      await BleManager.scan([], 10, true);
-      addResponse('Начато сканирование Bluetooth устройств');
+      setDevices([]);
+      setIsScanning(true);
+      setStatus('Сканирование...');
+      startScanAnimation();
+
+      const handleDiscoverPeripheral = (peripheral: any) => {
+        if (peripheral.name) {
+          setDevices(current => {
+            const exists = current.find(device => device.id === peripheral.id);
+            if (!exists) {
+              return [
+                ...current,
+                {
+                  id: peripheral.id,
+                  name: peripheral.name,
+                  rssi: peripheral.rssi,
+                },
+              ];
+            }
+            return current;
+          });
+        }
+      };
+
+      DeviceEventEmitter.addListener(
+        'BleManagerDiscoverPeripheral',
+        handleDiscoverPeripheral,
+      );
+
+      await BleManager.scan([], 30, false);
+
+      setTimeout(() => {
+        stopScan();
+      }, 30000);
     } catch (error) {
-      console.log('Ошибка сканирования:', error);
+      console.error('Ошибка сканирования:', error);
       setStatus('Ошибка сканирования');
       setIsScanning(false);
       stopScanAnimation();
     }
   };
 
-  // Подключение к устройству
-  const connectToDevice = async (deviceId: string) => {
+  const stopScan = () => {
+    BleManager.stopScan();
+    setIsScanning(false);
+    setStatus('Сканирование завершено');
+    stopScanAnimation();
+    DeviceEventEmitter.removeAllListeners('BleManagerDiscoverPeripheral');
+  };
+
+  const connectToDevice = async (deviceId: string, deviceName?: string) => {
     try {
-      setStatus('Подключение...');
+      setStatus(`Подключение к ${deviceName || deviceId}...`);
       await BleManager.connect(deviceId);
+      await BleManager.retrieveServices(deviceId);
+
       setConnectedDevice(deviceId);
       setIsConnected(true);
-      setStatus('Подключено');
-      addResponse(`Подключено к устройству: ${deviceId}`);
+      setStatus(`Подключено к ${deviceName || deviceId}`);
 
-      // Получение сервисов
-      setTimeout(async () => {
-        try {
-          const peripheralInfo = await BleManager.retrieveServices(deviceId);
-          console.log('Информация об устройстве:', peripheralInfo);
-          addResponse('Получена информация об устройстве');
-
-          // Запуск уведомлений
-          await BleManager.startNotification(deviceId, SERVICE_UUID, TX_UUID);
-          addResponse('Уведомления активированы');
-        } catch (error) {
-          console.log('Ошибка настройки:', error);
-          addResponse(`Ошибка настройки: ${error}`);
-        }
-      }, 1000);
+      Alert.alert('Успех', `Подключено к ${deviceName || deviceId}`);
     } catch (error) {
-      console.log('Ошибка подключения:', error);
+      console.error('Ошибка подключения:', error);
       setStatus('Ошибка подключения');
-      addResponse(`Ошибка подключения: ${error}`);
+      Alert.alert('Ошибка', 'Не удалось подключиться к устройству');
     }
   };
 
-  // Отправка команды
-  const sendCommand = async () => {
-    if (!connectedDevice || !command.trim()) {
-      return;
-    }
-
-    try {
-      const commandWithCR = command + '\r';
-      const data = Array.from(commandWithCR).map(char => char.charCodeAt(0));
-
-      await BleManager.write(connectedDevice, SERVICE_UUID, RX_UUID, data);
-      addResponse(`Отправлено: ${command}`);
-      setCommand('');
-    } catch (error) {
-      console.log('Ошибка отправки:', error);
-      addResponse(`Ошибка отправки: ${error}`);
-    }
-  };
-
-  // Быстрый тест
-  const runQuickTest = async () => {
-    if (!connectedDevice) return;
-
-    const commands = ['ATZ', 'ATE0', 'ATL1', '01 00'];
-    for (const cmd of commands) {
-      setCommand(cmd);
-      await sendCommand();
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-  };
-
-  // Отключение
   const disconnectDevice = async () => {
     if (connectedDevice) {
       try {
@@ -318,243 +235,247 @@ const OBDScannerScreen: React.FC = () => {
         setConnectedDevice(null);
         setIsConnected(false);
         setStatus('Отключено');
-        addResponse('Устройство отключено');
+        setResponses([]);
+        Alert.alert('Успех', 'Устройство отключено');
       } catch (error) {
-        console.log('Ошибка отключения:', error);
+        console.error('Ошибка отключения:', error);
+        Alert.alert('Ошибка', 'Не удалось отключиться');
       }
     }
   };
 
-  // Рендер элемента устройства
+  const sendCommand = async () => {
+    if (!connectedDevice || !command.trim()) {
+      Alert.alert('Ошибка', 'Введите команду для отправки');
+      return;
+    }
+
+    try {
+      const commandWithCR = command.trim() + '\r';
+      const data = Array.from(commandWithCR, char => char.charCodeAt(0));
+
+      await BleManager.write(connectedDevice, SERVICE_UUID, RX_UUID, data);
+
+      setResponses(current => [
+        ...current,
+        `> ${command}`,
+        'Команда отправлена...',
+      ]);
+      setCommand('');
+
+      // Здесь должна быть логика чтения ответа
+      setTimeout(() => {
+        setResponses(current => [...current, 'Ответ получен (пример)']);
+      }, 1000);
+    } catch (error) {
+      console.error('Ошибка отправки команды:', error);
+      setResponses(current => [...current, `Ошибка: ${error}`]);
+    }
+  };
+
+  const runQuickTest = () => {
+    setCommand('01 00');
+    sendCommand();
+  };
+
   const renderDevice = ({ item }: { item: BluetoothDevice }) => (
-    <View style={styles.deviceCard}>
-      <View style={styles.deviceHeader}>
-        <View style={styles.deviceIcon}>
-          <Text style={styles.deviceIconText}>🚗</Text>
-        </View>
-        <View style={styles.deviceInfo}>
-          <Text style={styles.deviceName}>
-            {item.name || 'Неизвестное устройство'}
-          </Text>
-          <Text style={styles.deviceId}>{item.id}</Text>
-          {item.rssi && (
-            <Text style={styles.deviceRssi}>Сигнал: {item.rssi} dBm</Text>
-          )}
-        </View>
+    <View style={styles.deviceItem}>
+      <View style={styles.deviceInfo}>
+        <Text style={styles.deviceName}>
+          {item.name || 'Неизвестное устройство'}
+        </Text>
+        <Text style={styles.deviceId}>{item.id}</Text>
+        {item.rssi && (
+          <Text style={styles.deviceRssi}>RSSI: {item.rssi} dBm</Text>
+        )}
       </View>
       <TouchableOpacity
         style={styles.connectButton}
-        onPress={() => connectToDevice(item.id)}
+        onPress={() => connectToDevice(item.id, item.name)}
       >
         <Text style={styles.connectButtonText}>Подключить</Text>
       </TouchableOpacity>
     </View>
   );
 
-  const scanInterpolation = scanAnimation.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
-
-  // ИСПРАВЛЕНО: Вынесли стили для backgroundColor в переменную
-  const getStatusBackgroundColor = () => {
-    if (isConnected) return '#00ff88';
-    if (isScanning) return '#ffaa00';
-    return '#666';
-  };
-
   return (
     <SafeAreaView style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.title}>🔧 OBD2 Сканер</Text>
-        <Text style={styles.subtitle}>ELM327 Bluetooth LE Scanner</Text>
+        <Animated.View
+          style={[
+            styles.statusContainer,
+            isConnected && {
+              transform: [{ scale: pulseAnimation }],
+            },
+          ]}
+        >
+          <Text style={[styles.status, isConnected && styles.connectedStatus]}>
+            {status}
+          </Text>
+        </Animated.View>
 
-        {/* Status */}
-        <View style={styles.statusContainer}>
-          <Animated.View
-            style={[
-              styles.statusIndicator,
-              {
-                backgroundColor: getStatusBackgroundColor(),
-                transform: [{ scale: isConnected ? pulseAnimation : 1 }],
-              },
-            ]}
-          />
-          <Text style={styles.statusText}>{status}</Text>
-        </View>
-
-        {/* Header Controls */}
-        <View style={styles.headerControls}>
+        <View style={styles.controls}>
           <TouchableOpacity
-            style={styles.headerScanButton}
-            onPress={scanForDevices}
+            style={[styles.scanButton, isScanning && styles.scanButtonActive]}
+            onPress={startScan}
+            disabled={isConnected}
           >
-            <Text style={styles.headerScanButtonText}>
+            <Text style={styles.scanButtonText}>
               {isScanning ? '⏹️ Остановить' : '🔍 Сканировать'}
             </Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* Content - здесь должен быть остальной контент */}
-      {!isConnected ? (
-        // Список устройств
-        <View style={styles.content}>
-          <Text style={styles.sectionTitle}>Найденные устройства:</Text>
-          <FlatList
-            data={devices}
-            renderItem={renderDevice}
-            keyExtractor={item => item.id}
-            style={styles.deviceList}
-          />
-        </View>
-      ) : (
-        // Интерфейс для подключенного устройства
-        <View style={styles.content}>
-          <Text style={styles.sectionTitle}>Управление OBD2</Text>
-
-          <View style={styles.commandSection}>
-            <TextInput
-              style={styles.commandInput}
-              placeholder="Введите OBD команду (например: 01 00)"
-              value={command}
-              onChangeText={setCommand}
-              autoCapitalize="characters"
-            />
-            <TouchableOpacity style={styles.sendButton} onPress={sendCommand}>
-              <Text style={styles.sendButtonText}>Отправить</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.quickActions}>
-            <ActionButton
-              title="Быстрый тест"
-              icon="⚡"
-              onPress={runQuickTest}
-              variant="secondary"
-            />
-            <ActionButton
-              title="Отключить"
-              icon="🔌"
-              onPress={disconnectDevice}
-              variant="danger"
+      {/* Content с KeyboardAwareScrollView */}
+      <KeyboardAwareScrollView
+        style={styles.content}
+        contentContainerStyle={styles.contentContainer}
+        enableAutomaticScroll={true}
+        enableOnAndroid={true}
+        extraScrollHeight={100}
+        keyboardOpeningTime={250}
+        keyboardShouldPersistTaps="handled"
+        resetScrollToCoords={{ x: 0, y: 0 }}
+      >
+        {!isConnected ? (
+          // Список устройств
+          <View>
+            <Text style={styles.sectionTitle}>Найденные устройства:</Text>
+            <FlatList
+              data={devices}
+              renderItem={renderDevice}
+              keyExtractor={item => item.id}
+              style={styles.deviceList}
+              scrollEnabled={false} // Отключаем скролл у FlatList, так как используем KeyboardAwareScrollView
             />
           </View>
+        ) : (
+          // Интерфейс для подключенного устройства
+          <View>
+            <Text style={styles.sectionTitle}>Управление OBD2</Text>
 
-          <ScrollView style={styles.responseContainer}>
-            <Text style={styles.responsesTitle}>Ответы:</Text>
-            {responses.map((response, index) => (
-              <Text key={index} style={styles.responseText}>
-                {response}
-              </Text>
-            ))}
-          </ScrollView>
-        </View>
-      )}
+            <View style={styles.commandSection}>
+              <TextInput
+                style={styles.commandInput}
+                placeholder="Введите OBD команду (например: 01 00)"
+                value={command}
+                onChangeText={setCommand}
+                autoCapitalize="characters"
+                placeholderTextColor="#999"
+              />
+              <TouchableOpacity style={styles.sendButton} onPress={sendCommand}>
+                <Text style={styles.sendButtonText}>Отправить</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.quickActions}>
+              <ActionButton
+                title="Быстрый тест"
+                icon="⚡"
+                onPress={runQuickTest}
+                variant="secondary"
+              />
+              <ActionButton
+                title="Отключить"
+                icon="🔌"
+                onPress={disconnectDevice}
+                variant="danger"
+              />
+            </View>
+
+            <View style={styles.responseContainer}>
+              <Text style={styles.responsesTitle}>Ответы:</Text>
+              {responses.map((response, index) => (
+                <Text key={index} style={styles.responseText}>
+                  {response}
+                </Text>
+              ))}
+            </View>
+          </View>
+        )}
+      </KeyboardAwareScrollView>
     </SafeAreaView>
   );
 };
 
-// Добавляем базовые стили (добавьте остальные стили по необходимости)
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#0a0a0a',
   },
   header: {
-    backgroundColor: '#2196F3',
     padding: 20,
-    alignItems: 'center',
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 5,
-  },
-  subtitle: {
-    fontSize: 16,
-    color: 'rgba(255,255,255,0.8)',
-    marginBottom: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
   },
   statusContainer: {
-    flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 15,
   },
-  statusIndicator: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    marginRight: 8,
-  },
-  statusText: {
-    color: 'white',
+  status: {
     fontSize: 16,
+    color: '#ffffff',
+    fontWeight: '600',
   },
-  headerControls: {
-    width: '100%',
+  connectedStatus: {
+    color: '#00ff88',
   },
-  headerScanButton: {
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    padding: 12,
-    borderRadius: 8,
+  controls: {
     alignItems: 'center',
   },
-  headerScanButtonText: {
-    color: 'white',
+  scanButton: {
+    backgroundColor: '#333',
+    paddingHorizontal: 30,
+    paddingVertical: 12,
+    borderRadius: 25,
+    borderWidth: 2,
+    borderColor: '#555',
+  },
+  scanButtonActive: {
+    backgroundColor: '#ff6b6b',
+    borderColor: '#ff6b6b',
+  },
+  scanButtonText: {
+    color: '#ffffff',
     fontSize: 16,
     fontWeight: '600',
   },
   content: {
     flex: 1,
-    padding: 16,
+  },
+  contentContainer: {
+    flexGrow: 1,
+    padding: 20,
   },
   sectionTitle: {
+    color: '#00ff88',
     fontSize: 18,
     fontWeight: 'bold',
-    marginBottom: 16,
-    color: '#333',
+    marginBottom: 15,
   },
   deviceList: {
-    flex: 1,
+    flexGrow: 0,
   },
-  deviceCard: {
-    backgroundColor: 'white',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  deviceHeader: {
+  deviceItem: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
-  },
-  deviceIcon: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: '#f0f0f0',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  deviceIconText: {
-    fontSize: 24,
+    backgroundColor: '#1a1a1a',
+    padding: 15,
+    borderRadius: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#333',
   },
   deviceInfo: {
     flex: 1,
   },
   deviceName: {
+    color: '#ffffff',
     fontSize: 16,
-    fontWeight: 'bold',
-    color: '#333',
+    fontWeight: '600',
   },
   deviceId: {
     fontSize: 12,
@@ -583,11 +504,12 @@ const styles = StyleSheet.create({
   commandInput: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: '#333',
     borderRadius: 8,
     padding: 12,
     marginRight: 8,
-    backgroundColor: 'white',
+    backgroundColor: '#1a1a1a',
+    color: '#ffffff',
   },
   sendButton: {
     backgroundColor: '#2196F3',
@@ -638,20 +560,20 @@ const styles = StyleSheet.create({
     color: 'white',
   },
   responseContainer: {
-    flex: 1,
-    backgroundColor: 'white',
+    backgroundColor: '#1a1a1a',
     borderRadius: 8,
     padding: 12,
+    minHeight: 200,
   },
   responsesTitle: {
     fontSize: 16,
     fontWeight: 'bold',
     marginBottom: 8,
-    color: '#333',
+    color: '#00ff88',
   },
   responseText: {
     fontSize: 12,
-    color: '#666',
+    color: '#ffffff',
     marginBottom: 4,
     fontFamily: 'monospace',
   },

@@ -19,6 +19,7 @@
     "react-native": "0.80.0",
     "react-native-ble-manager": "^12.1.5",
     "react-native-bluetooth-classic": "^1.73.0-rc.13",
+    "react-native-keyboard-aware-scroll-view": "^0.9.5",
     "react-native-safe-area-context": "^5.4.1",
     "react-native-screens": "^4.11.1"
   },

@@ -1,219 +1,205 @@
 import React, { useState, useEffect } from 'react';
 import {
-  SafeAreaView,
   View,
   Text,
   TouchableOpacity,
-  FlatList,
   StyleSheet,
-  Alert,
-  TextInput,
   Modal,
-  ScrollView,
+  TextInput,
+  Alert,
+  FlatList,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 interface MaintenanceItem {
   id: string;
   type: string;
   name: string;
+  icon: string;
+  intervalKm: number;
   currentMileage: number;
   lastServiceMileage: number;
-  serviceInterval: number;
   nextServiceMileage: number;
-  lastServiceDate: string;
-  icon: string;
-  isOverdue: boolean;
-  urgencyLevel: 'low' | 'medium' | 'high';
+  status: 'good' | 'warning' | 'overdue';
+  daysLeft?: number;
 }
 
-interface AddServiceModalProps {
-  visible: boolean;
-  onClose: () => void;
-  onAdd: (item: Partial<MaintenanceItem>) => void;
-}
-
-const predefinedServices = [
-  { type: 'oil', name: 'Замена моторного масла', interval: 10000, icon: '🛢️' },
-  {
-    type: 'filter_oil',
-    name: 'Замена масляного фильтра',
-    interval: 10000,
-    icon: '🔧',
-  },
-  {
-    type: 'filter_air',
-    name: 'Замена воздушного фильтра',
-    interval: 20000,
-    icon: '💨',
-  },
-  {
-    type: 'filter_fuel',
-    name: 'Замена топливного фильтра',
-    interval: 30000,
-    icon: '⛽',
-  },
-  {
-    type: 'brake_fluid',
-    name: 'Замена тормозной жидкости',
-    interval: 40000,
-    icon: '🚫',
-  },
+const serviceTypes = [
+  { type: 'oil', name: 'Замена масла', icon: '🛢️', intervalKm: 10000 },
+  { type: 'filter', name: 'Замена фильтров', icon: '🔧', intervalKm: 15000 },
+  { type: 'brake', name: 'Тормозная система', icon: '🛑', intervalKm: 30000 },
+  { type: 'tires', name: 'Шины', icon: '🚗', intervalKm: 40000 },
+  { type: 'spark', name: 'Свечи зажигания', icon: '⚡', intervalKm: 20000 },
   {
     type: 'coolant',
-    name: 'Замена охлаждающей жидкости',
-    interval: 50000,
+    name: 'Охлаждающая жидкость',
     icon: '❄️',
-  },
-  {
-    type: 'spark_plugs',
-    name: 'Замена свечей зажигания',
-    interval: 30000,
-    icon: '⚡',
-  },
-  {
-    type: 'brake_pads',
-    name: 'Замена тормозных колодок',
-    interval: 25000,
-    icon: '🛡️',
-  },
-  { type: 'tires', name: 'Замена шин', interval: 60000, icon: '🛞' },
-  {
-    type: 'transmission',
-    name: 'ТО коробки передач',
-    interval: 60000,
-    icon: '⚙️',
+    intervalKm: 60000,
   },
 ];
 
-const AddServiceModal: React.FC<AddServiceModalProps> = ({
+const calculateItemStatus = (
+  item: MaintenanceItem,
+  currentMileage: number,
+): MaintenanceItem => {
+  const nextServiceMileage = item.lastServiceMileage + item.intervalKm;
+  const remainingKm = nextServiceMileage - currentMileage;
+
+  let status: 'good' | 'warning' | 'overdue';
+  if (remainingKm < 0) {
+    status = 'overdue';
+  } else if (remainingKm <= item.intervalKm * 0.1) {
+    status = 'warning';
+  } else {
+    status = 'good';
+  }
+
+  return {
+    ...item,
+    currentMileage,
+    nextServiceMileage,
+    status,
+  };
+};
+
+interface AddMaintenanceModalProps {
+  visible: boolean;
+  onClose: () => void;
+  onAdd: (
+    item: Omit<MaintenanceItem, 'id' | 'status' | 'nextServiceMileage'>,
+  ) => void;
+  currentMileage: number;
+}
+
+const AddMaintenanceModal: React.FC<AddMaintenanceModalProps> = ({
   visible,
   onClose,
   onAdd,
+  currentMileage,
 }) => {
-  const [selectedService, setSelectedService] = useState<any>(null);
-  const [currentMileage, setCurrentMileage] = useState('');
-  const [lastServiceMileage, setLastServiceMileage] = useState('');
-  const [customName, setCustomName] = useState('');
-  const [customInterval, setCustomInterval] = useState('');
+  const [selectedType, setSelectedType] = useState<string>('');
+  const [customName, setCustomName] = useState<string>('');
+  const [customInterval, setCustomInterval] = useState<string>('');
+  const [currentMileageVal, setCurrentMileageVal] = useState<string>(
+    currentMileage.toString(),
+  );
+  const [lastServiceMileage, setLastServiceMileage] = useState<string>('');
 
   const handleAdd = () => {
-    if (!selectedService && !customName) {
-      Alert.alert('Ошибка', 'Выберите услугу или введите название');
+    if (!selectedType || !lastServiceMileage) {
+      Alert.alert('Ошибка', 'Заполните все обязательные поля');
       return;
     }
 
-    if (!currentMileage || !lastServiceMileage) {
-      Alert.alert('Ошибка', 'Введите текущий пробег и пробег последнего ТО');
-      return;
-    }
+    const serviceType = serviceTypes.find(s => s.type === selectedType);
+    if (!serviceType) return;
 
-    const currentMiles = parseInt(currentMileage);
-    const lastMiles = parseInt(lastServiceMileage);
-    const interval = selectedService
-      ? selectedService.interval
-      : parseInt(customInterval);
-
-    if (isNaN(currentMiles) || isNaN(lastMiles) || isNaN(interval)) {
-      Alert.alert('Ошибка', 'Введите корректные числовые значения');
-      return;
-    }
-
-    const newItem: Partial<MaintenanceItem> = {
-      id: Date.now().toString(),
-      type: selectedService ? selectedService.type : 'custom',
-      name: selectedService ? selectedService.name : customName,
-      currentMileage: currentMiles,
-      lastServiceMileage: lastMiles,
-      serviceInterval: interval,
-      nextServiceMileage: lastMiles + interval,
-      lastServiceDate: new Date().toISOString().split('T')[0],
-      icon: selectedService ? selectedService.icon : '🔧',
+    const newItem = {
+      type: selectedType,
+      name: customName || serviceType.name,
+      icon: serviceType.icon,
+      intervalKm: customInterval
+        ? parseInt(customInterval)
+        : serviceType.intervalKm,
+      currentMileage: parseInt(currentMileageVal),
+      lastServiceMileage: parseInt(lastServiceMileage),
     };
 
     onAdd(newItem);
 
     // Сброс формы
-    setSelectedService(null);
-    setCurrentMileage('');
-    setLastServiceMileage('');
+    setSelectedType('');
     setCustomName('');
     setCustomInterval('');
+    setLastServiceMileage('');
     onClose();
   };
 
   return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-    >
+    <Modal visible={visible} animationType="slide">
       <SafeAreaView style={styles.modalContainer}>
         <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>Добавить услугу ТО</Text>
+          <Text style={styles.modalTitle}>Добавить обслуживание</Text>
           <TouchableOpacity onPress={onClose}>
             <Text style={styles.closeButton}>✕</Text>
           </TouchableOpacity>
         </View>
 
-        <ScrollView style={styles.modalContent}>
-          <Text style={styles.sectionTitle}>Выберите тип ТО:</Text>
-
-          {predefinedServices.map(service => (
+        <KeyboardAwareScrollView
+          style={styles.modalContent}
+          contentContainerStyle={{ flexGrow: 1 }}
+          enableAutomaticScroll={true}
+          enableOnAndroid={true}
+          extraScrollHeight={100}
+          keyboardOpeningTime={250}
+          keyboardShouldPersistTaps="handled"
+          resetScrollToCoords={{ x: 0, y: 0 }}
+        >
+          <Text style={styles.sectionTitle}>Выберите тип обслуживания:</Text>
+          {serviceTypes.map(service => (
             <TouchableOpacity
               key={service.type}
               style={[
                 styles.serviceOption,
-                selectedService?.type === service.type &&
-                  styles.selectedServiceOption,
+                selectedType === service.type && styles.selectedServiceOption,
               ]}
-              onPress={() => setSelectedService(service)}
+              onPress={() => setSelectedType(service.type)}
             >
               <Text style={styles.serviceIcon}>{service.icon}</Text>
-              <Text style={styles.serviceName}>{service.name}</Text>
-              <Text style={styles.serviceInterval}>{service.interval} км</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.serviceName}>{service.name}</Text>
+                <Text style={styles.serviceInterval}>
+                  Интервал: {service.intervalKm.toLocaleString()} км
+                </Text>
+              </View>
             </TouchableOpacity>
           ))}
 
-          <Text style={styles.sectionTitle}>Или создайте свою:</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Название услуги"
-            placeholderTextColor="#666"
-            value={customName}
-            onChangeText={setCustomName}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Интервал обслуживания (км)"
-            placeholderTextColor="#666"
-            value={customInterval}
-            onChangeText={setCustomInterval}
-            keyboardType="numeric"
-          />
+          {selectedType && (
+            <>
+              <Text style={styles.sectionTitle}>Настройки:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Название (необязательно)"
+                placeholderTextColor="#666"
+                value={customName}
+                onChangeText={setCustomName}
+              />
+              <TextInput
+                style={styles.input}
+                placeholder="Интервал в км (необязательно)"
+                placeholderTextColor="#666"
+                value={customInterval}
+                onChangeText={setCustomInterval}
+                keyboardType="numeric"
+              />
 
-          <Text style={styles.sectionTitle}>Данные пробега:</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Текущий пробег (км)"
-            placeholderTextColor="#666"
-            value={currentMileage}
-            onChangeText={setCurrentMileage}
-            keyboardType="numeric"
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Пробег последнего ТО (км)"
-            placeholderTextColor="#666"
-            value={lastServiceMileage}
-            onChangeText={setLastServiceMileage}
-            keyboardType="numeric"
-          />
+              <Text style={styles.sectionTitle}>Данные пробега:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Текущий пробег (км)"
+                placeholderTextColor="#666"
+                value={currentMileageVal}
+                onChangeText={setCurrentMileageVal}
+                keyboardType="numeric"
+              />
+              <TextInput
+                style={styles.input}
+                placeholder="Пробег последнего ТО (км)"
+                placeholderTextColor="#666"
+                value={lastServiceMileage}
+                onChangeText={setLastServiceMileage}
+                keyboardType="numeric"
+              />
 
-          <TouchableOpacity style={styles.addButton} onPress={handleAdd}>
-            <Text style={styles.addButtonText}>Добавить</Text>
-          </TouchableOpacity>
-        </ScrollView>
+              <TouchableOpacity style={styles.addButton} onPress={handleAdd}>
+                <Text style={styles.addButtonText}>Добавить</Text>
+              </TouchableOpacity>
+            </>
+          )}
+        </KeyboardAwareScrollView>
       </SafeAreaView>
     </Modal>
   );
@@ -263,36 +249,19 @@ const CarKeeperScreen: React.FC = () => {
     }
   };
 
-  const calculateItemStatus = (
-    item: MaintenanceItem,
-    currentMiles: number,
-  ): MaintenanceItem => {
-    const remainingMileage = item.nextServiceMileage - currentMiles;
-    const isOverdue = remainingMileage <= 0;
-
-    let urgencyLevel: 'low' | 'medium' | 'high' = 'low';
-    if (isOverdue) {
-      urgencyLevel = 'high';
-    } else if (remainingMileage <= item.serviceInterval * 0.1) {
-      urgencyLevel = 'high';
-    } else if (remainingMileage <= item.serviceInterval * 0.2) {
-      urgencyLevel = 'medium';
-    }
-
-    return {
-      ...item,
-      currentMileage: currentMiles,
-      isOverdue,
-      urgencyLevel,
+  const addMaintenanceItem = (
+    newItem: Omit<MaintenanceItem, 'id' | 'status' | 'nextServiceMileage'>,
+  ) => {
+    const item: MaintenanceItem = {
+      ...newItem,
+      id: Date.now().toString(),
+      status: 'good',
+      nextServiceMileage: newItem.lastServiceMileage + newItem.intervalKm,
     };
-  };
 
-  const addMaintenanceItem = (newItem: Partial<MaintenanceItem>) => {
-    const item = calculateItemStatus(
-      newItem as MaintenanceItem,
-      currentMileage,
-    );
-    const updatedItems = [...maintenanceItems, item];
+    const calculatedItem = calculateItemStatus(item, currentMileage);
+    const updatedItems = [...maintenanceItems, calculatedItem];
+
     setMaintenanceItems(updatedItems);
     saveData(updatedItems, currentMileage);
   };
@@ -300,148 +269,116 @@ const CarKeeperScreen: React.FC = () => {
   const updateMileage = () => {
     const newMileage = parseInt(tempMileage);
     if (isNaN(newMileage) || newMileage < 0) {
-      Alert.alert('Ошибка', 'Введите корректное значение пробега');
+      Alert.alert('Ошибка', 'Введите корректный пробег');
       return;
     }
 
     const updatedItems = maintenanceItems.map(item =>
       calculateItemStatus(item, newMileage),
     );
-    setMaintenanceItems(updatedItems);
+
     setCurrentMileage(newMileage);
+    setMaintenanceItems(updatedItems);
     setEditMileageMode(false);
     setTempMileage('');
     saveData(updatedItems, newMileage);
   };
 
-  const markAsCompleted = (itemId: string) => {
-    Alert.alert('Подтверждение', 'Отметить как выполненное?', [
-      { text: 'Отмена', style: 'cancel' },
-      {
-        text: 'Да',
-        onPress: () => {
-          const updatedItems = maintenanceItems.map(item => {
-            if (item.id === itemId) {
-              return calculateItemStatus(
-                {
-                  ...item,
-                  lastServiceMileage: currentMileage,
-                  nextServiceMileage: currentMileage + item.serviceInterval,
-                  lastServiceDate: new Date().toISOString().split('T')[0],
-                },
-                currentMileage,
-              );
-            }
-            return item;
-          });
-          setMaintenanceItems(updatedItems);
-          saveData(updatedItems, currentMileage);
+  const deleteItem = (id: string) => {
+    Alert.alert(
+      'Удалить запись',
+      'Вы уверены, что хотите удалить эту запись?',
+      [
+        { text: 'Отмена', style: 'cancel' },
+        {
+          text: 'Удалить',
+          style: 'destructive',
+          onPress: () => {
+            const updatedItems = maintenanceItems.filter(
+              item => item.id !== id,
+            );
+            setMaintenanceItems(updatedItems);
+            saveData(updatedItems, currentMileage);
+          },
         },
-      },
-    ]);
+      ],
+    );
   };
 
-  const deleteItem = (itemId: string) => {
-    Alert.alert('Удаление', 'Удалить запись?', [
-      { text: 'Отмена', style: 'cancel' },
-      {
-        text: 'Удалить',
-        style: 'destructive',
-        onPress: () => {
-          const updatedItems = maintenanceItems.filter(
-            item => item.id !== itemId,
-          );
-          setMaintenanceItems(updatedItems);
-          saveData(updatedItems, currentMileage);
-        },
-      },
-    ]);
-  };
-
-  const getUrgencyColor = (urgency: 'low' | 'medium' | 'high') => {
-    switch (urgency) {
-      case 'high':
-        return '#ff6b6b';
-      case 'medium':
-        return '#ffaa00';
-      case 'low':
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'good':
         return '#00ff88';
+      case 'warning':
+        return '#ffaa00';
+      case 'overdue':
+        return '#ff4444';
       default:
         return '#666';
     }
   };
 
-  const renderMaintenanceItem = ({ item }: { item: MaintenanceItem }) => {
-    const remainingMileage = item.nextServiceMileage - currentMileage;
-
-    return (
-      <View
-        style={[
-          styles.itemCard,
-          { borderLeftColor: getUrgencyColor(item.urgencyLevel) },
-        ]}
-      >
-        <View style={styles.itemHeader}>
-          <Text style={styles.itemIcon}>{item.icon}</Text>
-          <View style={styles.itemInfo}>
-            <Text style={styles.itemName}>{item.name}</Text>
-            <Text style={styles.itemDetails}>
-              Интервал: {item.serviceInterval.toLocaleString()} км
-            </Text>
-            <Text style={styles.itemDetails}>
-              Последнее ТО: {item.lastServiceMileage.toLocaleString()} км
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.itemStatus}>
-          {remainingMileage > 0 ? (
-            <Text
-              style={[
-                styles.remainingText,
-                { color: getUrgencyColor(item.urgencyLevel) },
-              ]}
-            >
-              Осталось: {remainingMileage.toLocaleString()} км
-            </Text>
-          ) : (
-            <Text style={styles.overdueText}>
-              Просрочено на {Math.abs(remainingMileage).toLocaleString()} км
-            </Text>
-          )}
-        </View>
-
-        <View style={styles.itemActions}>
-          <TouchableOpacity
-            style={styles.completeButton}
-            onPress={() => markAsCompleted(item.id)}
-          >
-            <Text style={styles.completeButtonText}>✓ Выполнено</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.deleteButton}
-            onPress={() => deleteItem(item.id)}
-          >
-            <Text style={styles.deleteButtonText}>🗑️</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
+  const getStatusText = (item: MaintenanceItem) => {
+    const remaining = item.nextServiceMileage - currentMileage;
+    if (remaining < 0) {
+      return `Просрочено на ${Math.abs(remaining).toLocaleString()} км`;
+    }
+    return `Осталось: ${remaining.toLocaleString()} км`;
   };
 
-  const overdueCount = maintenanceItems.filter(item => item.isOverdue).length;
-  const soonCount = maintenanceItems.filter(
-    item => !item.isOverdue && item.urgencyLevel === 'high',
-  ).length;
+  const renderMaintenanceItem = ({ item }: { item: MaintenanceItem }) => (
+    <View style={styles.maintenanceItem}>
+      <View style={styles.itemHeader}>
+        <Text style={styles.itemIcon}>{item.icon}</Text>
+        <View style={styles.itemInfo}>
+          <Text style={styles.itemName}>{item.name}</Text>
+          <Text style={styles.itemInterval}>
+            Интервал: {item.intervalKm.toLocaleString()} км
+          </Text>
+        </View>
+        <TouchableOpacity
+          style={styles.deleteButton}
+          onPress={() => deleteItem(item.id)}
+        >
+          <Text style={styles.deleteButtonText}>✕</Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.itemStatus}>
+        <Text
+          style={[styles.statusText, { color: getStatusColor(item.status) }]}
+        >
+          {getStatusText(item)}
+        </Text>
+        <View style={styles.progressContainer}>
+          <View
+            style={[
+              styles.progressBar,
+              {
+                width: `${Math.max(
+                  0,
+                  Math.min(
+                    100,
+                    ((currentMileage - item.lastServiceMileage) /
+                      item.intervalKm) *
+                      100,
+                  ),
+                )}%`,
+                backgroundColor: getStatusColor(item.status),
+              },
+            ]}
+          />
+        </View>
+      </View>
+    </View>
+  );
 
   return (
     <SafeAreaView style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.title}>🚗 Car Keeper</Text>
-        <Text style={styles.subtitle}>Техническое обслуживание</Text>
+        <Text style={styles.title}>Car Keeper</Text>
 
-        {/* Current Mileage */}
         <View style={styles.mileageContainer}>
           {editMileageMode ? (
             <View style={styles.mileageEditContainer}>
@@ -449,25 +386,25 @@ const CarKeeperScreen: React.FC = () => {
                 style={styles.mileageInput}
                 value={tempMileage}
                 onChangeText={setTempMileage}
+                keyboardType="numeric"
                 placeholder={currentMileage.toString()}
                 placeholderTextColor="#666"
-                keyboardType="numeric"
                 autoFocus
               />
               <TouchableOpacity
-                style={styles.mileageSaveButton}
+                style={styles.saveButton}
                 onPress={updateMileage}
               >
-                <Text style={styles.mileageSaveText}>✓</Text>
+                <Text style={styles.saveButtonText}>✓</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.mileageCancelButton}
+                style={styles.cancelButton}
                 onPress={() => {
                   setEditMileageMode(false);
                   setTempMileage('');
                 }}
               >
-                <Text style={styles.mileageCancelText}>✕</Text>
+                <Text style={styles.cancelButtonText}>✕</Text>
               </TouchableOpacity>
             </View>
           ) : (
@@ -478,75 +415,48 @@ const CarKeeperScreen: React.FC = () => {
                 setTempMileage(currentMileage.toString());
               }}
             >
-              <Text style={styles.mileageText}>
-                📊 Пробег: {currentMileage.toLocaleString()} км
+              <Text style={styles.mileageLabel}>Текущий пробег:</Text>
+              <Text style={styles.mileageValue}>
+                {currentMileage.toLocaleString()} км
               </Text>
-              <Text style={styles.mileageEdit}>✏️</Text>
             </TouchableOpacity>
           )}
-        </View>
-
-        {/* Status Summary */}
-        <View style={styles.summaryContainer}>
-          {overdueCount > 0 && (
-            <View style={styles.summaryItem}>
-              <Text style={styles.summaryIcon}>🚨</Text>
-              <Text style={styles.summaryText}>Просрочено: {overdueCount}</Text>
-            </View>
-          )}
-          {soonCount > 0 && (
-            <View style={styles.summaryItem}>
-              <Text style={styles.summaryIcon}>⚠️</Text>
-              <Text style={styles.summaryText}>Скоро: {soonCount}</Text>
-            </View>
-          )}
-          {overdueCount === 0 &&
-            soonCount === 0 &&
-            maintenanceItems.length > 0 && (
-              <View style={styles.summaryItem}>
-                <Text style={styles.summaryIcon}>✅</Text>
-                <Text style={styles.summaryText}>Всё в порядке</Text>
-              </View>
-            )}
         </View>
       </View>
 
       {/* Content */}
-      <View style={styles.content}>
+      <KeyboardAwareScrollView
+        style={styles.content}
+        contentContainerStyle={styles.contentContainer}
+        enableAutomaticScroll={true}
+        enableOnAndroid={true}
+        extraScrollHeight={100}
+        keyboardOpeningTime={250}
+        keyboardShouldPersistTaps="handled"
+        resetScrollToCoords={{ x: 0, y: 0 }}
+      >
         {maintenanceItems.length === 0 ? (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyIcon}>🔧</Text>
-            <Text style={styles.emptyTitle}>
+            <Text style={styles.emptyStateIcon}>🚗</Text>
+            <Text style={styles.emptyStateTitle}>
               Добро пожаловать в Car Keeper!
             </Text>
-            <Text style={styles.emptyText}>
-              Начните отслеживать техническое обслуживание вашего автомобиля
+            <Text style={styles.emptyStateText}>
+              Добавьте первую запись об обслуживании вашего автомобиля
             </Text>
           </View>
         ) : (
           <FlatList
-            data={maintenanceItems.sort((a, b) => {
-              if (a.isOverdue && !b.isOverdue) return -1;
-              if (!a.isOverdue && b.isOverdue) return 1;
-              if (a.urgencyLevel === 'high' && b.urgencyLevel !== 'high')
-                return -1;
-              if (a.urgencyLevel !== 'high' && b.urgencyLevel === 'high')
-                return 1;
-              return (
-                a.nextServiceMileage -
-                a.currentMileage -
-                (b.nextServiceMileage - b.currentMileage)
-              );
-            })}
+            data={maintenanceItems}
             renderItem={renderMaintenanceItem}
             keyExtractor={item => item.id}
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.listContainer}
+            style={styles.maintenanceList}
+            scrollEnabled={false} // Отключаем скролл у FlatList
           />
         )}
-      </View>
+      </KeyboardAwareScrollView>
 
-      {/* Add Button */}
+      {/* FAB */}
       <TouchableOpacity
         style={styles.fab}
         onPress={() => setModalVisible(true)}
@@ -554,11 +464,12 @@ const CarKeeperScreen: React.FC = () => {
         <Text style={styles.fabText}>+</Text>
       </TouchableOpacity>
 
-      {/* Add Service Modal */}
-      <AddServiceModal
+      {/* Modal */}
+      <AddMaintenanceModal
         visible={modalVisible}
         onClose={() => setModalVisible(false)}
         onAdd={addMaintenanceItem}
+        currentMileage={currentMileage}
       />
     </SafeAreaView>
   );
@@ -570,151 +481,130 @@ const styles = StyleSheet.create({
     backgroundColor: '#0a0a0a',
   },
   header: {
-    paddingHorizontal: 20,
-    paddingVertical: 15,
+    padding: 20,
     borderBottomWidth: 1,
     borderBottomColor: '#333',
   },
   title: {
+    color: '#ffffff',
     fontSize: 28,
     fontWeight: 'bold',
-    color: '#ffffff',
     textAlign: 'center',
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#888',
-    textAlign: 'center',
-    marginTop: 5,
+    marginBottom: 20,
   },
   mileageContainer: {
-    marginTop: 15,
+    alignItems: 'center',
   },
   mileageDisplay: {
-    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    padding: 15,
     backgroundColor: '#1a1a1a',
-    paddingVertical: 10,
-    paddingHorizontal: 15,
-    borderRadius: 10,
-  },
-  mileageText: {
-    color: '#00ff88',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  mileageEdit: {
-    marginLeft: 10,
-    fontSize: 16,
+    borderRadius: 15,
+    borderWidth: 2,
+    borderColor: '#333',
   },
   mileageEditContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: 10,
   },
   mileageInput: {
     backgroundColor: '#1a1a1a',
     color: '#ffffff',
-    fontSize: 16,
-    paddingVertical: 10,
+    fontSize: 18,
+    fontWeight: 'bold',
     paddingHorizontal: 15,
+    paddingVertical: 10,
     borderRadius: 10,
-    flex: 1,
+    borderWidth: 2,
+    borderColor: '#00ff88',
     textAlign: 'center',
+    minWidth: 120,
   },
-  mileageSaveButton: {
+  saveButton: {
     backgroundColor: '#00ff88',
-    marginLeft: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 15,
-    borderRadius: 10,
-  },
-  mileageSaveText: {
-    color: '#000',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  mileageCancelButton: {
-    backgroundColor: '#ff6b6b',
-    marginLeft: 5,
-    paddingVertical: 10,
-    paddingHorizontal: 15,
-    borderRadius: 10,
-  },
-  mileageCancelText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  summaryContainer: {
-    flexDirection: 'row',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     justifyContent: 'center',
-    marginTop: 10,
-    flexWrap: 'wrap',
-  },
-  summaryItem: {
-    flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#1a1a1a',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 15,
-    marginHorizontal: 5,
-    marginVertical: 2,
   },
-  summaryIcon: {
+  saveButtonText: {
+    color: '#000',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  cancelButton: {
+    backgroundColor: '#ff4444',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cancelButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  mileageLabel: {
+    color: '#888',
     fontSize: 14,
-    marginRight: 5,
+    marginBottom: 5,
   },
-  summaryText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '500',
+  mileageValue: {
+    color: '#00ff88',
+    fontSize: 24,
+    fontWeight: 'bold',
   },
   content: {
     flex: 1,
+  },
+  contentContainer: {
+    flexGrow: 1,
+    padding: 20,
   },
   emptyState: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 40,
+    paddingHorizontal: 40,
   },
-  emptyIcon: {
+  emptyStateIcon: {
     fontSize: 80,
     marginBottom: 20,
   },
-  emptyTitle: {
+  emptyStateTitle: {
     color: '#ffffff',
-    fontSize: 20,
+    fontSize: 24,
     fontWeight: 'bold',
     textAlign: 'center',
     marginBottom: 10,
   },
-  emptyText: {
+  emptyStateText: {
     color: '#888',
     fontSize: 16,
     textAlign: 'center',
     lineHeight: 24,
   },
-  listContainer: {
-    padding: 20,
+  maintenanceList: {
+    flexGrow: 0,
   },
-  itemCard: {
+  maintenanceItem: {
     backgroundColor: '#1a1a1a',
     borderRadius: 15,
-    padding: 15,
+    padding: 20,
     marginBottom: 15,
-    borderLeftWidth: 4,
+    borderWidth: 1,
+    borderColor: '#333',
   },
   itemHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 15,
   },
   itemIcon: {
-    fontSize: 24,
+    fontSize: 30,
     marginRight: 15,
   },
   itemInfo: {
@@ -722,59 +612,48 @@ const styles = StyleSheet.create({
   },
   itemName: {
     color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 18,
+    fontWeight: 'bold',
     marginBottom: 5,
   },
-  itemDetails: {
+  itemInterval: {
     color: '#888',
-    fontSize: 12,
-    marginBottom: 2,
-  },
-  itemStatus: {
-    marginBottom: 10,
-  },
-  remainingText: {
     fontSize: 14,
-    fontWeight: '600',
-  },
-  overdueText: {
-    color: '#ff6b6b',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  itemActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  completeButton: {
-    backgroundColor: '#00ff88',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 10,
-    flex: 1,
-    marginRight: 10,
-  },
-  completeButtonText: {
-    color: '#000',
-    fontSize: 14,
-    fontWeight: '600',
-    textAlign: 'center',
   },
   deleteButton: {
-    backgroundColor: '#ff6b6b',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 10,
+    backgroundColor: '#ff4444',
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   deleteButtonText: {
+    color: '#fff',
     fontSize: 16,
+    fontWeight: 'bold',
+  },
+  itemStatus: {
+    gap: 10,
+  },
+  statusText: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  progressContainer: {
+    height: 8,
+    backgroundColor: '#333',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  progressBar: {
+    height: '100%',
+    borderRadius: 4,
   },
   fab: {
     position: 'absolute',
-    bottom: 30,
-    right: 30,
+    right: 20,
+    bottom: 20,
     width: 60,
     height: 60,
     borderRadius: 30,
