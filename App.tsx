@@ -96,12 +96,11 @@ const ActionButton: React.FC<ActionButtonProps> = ({
 const ModernCarScanner: React.FC = () => {
   const [devices, setDevices] = useState<Peripheral[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<string | null>(null);
-  const [status, setStatus] = useState<string>(
-    'Сканирование ELM327 адаптеров...',
-  );
+  const [status, setStatus] = useState<string>('Готов к сканированию');
   const [command, setCommand] = useState<string>('');
   const [responses, setResponses] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [isScanning, setIsScanning] = useState<boolean>(false); // Новое состояние
   const [scanAnimation] = useState(new Animated.Value(0));
   const [pulseAnimation] = useState(new Animated.Value(1));
 
@@ -109,18 +108,25 @@ const ModernCarScanner: React.FC = () => {
   const RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
   const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
-  // Анимации
-  useEffect(() => {
-    const startScanAnimation = () => {
-      Animated.loop(
-        Animated.timing(scanAnimation, {
-          toValue: 1,
-          duration: 2000,
-          useNativeDriver: false,
-        }),
-      ).start();
-    };
+  // Управление анимацией сканирования
+  const startScanAnimation = useCallback(() => {
+    scanAnimation.setValue(0);
+    Animated.loop(
+      Animated.timing(scanAnimation, {
+        toValue: 1,
+        duration: 2000,
+        useNativeDriver: false,
+      }),
+    ).start();
+  }, [scanAnimation]);
 
+  const stopScanAnimation = useCallback(() => {
+    scanAnimation.stopAnimation();
+    scanAnimation.setValue(0);
+  }, [scanAnimation]);
+
+  // Анимация пульса для статуса подключения
+  useEffect(() => {
     const startPulseAnimation = () => {
       Animated.loop(
         Animated.sequence([
@@ -138,9 +144,8 @@ const ModernCarScanner: React.FC = () => {
       ).start();
     };
 
-    startScanAnimation();
     startPulseAnimation();
-  }, [scanAnimation, pulseAnimation]);
+  }, [pulseAnimation]);
 
   const addResponse = useCallback((response: string) => {
     setResponses(prev => [
@@ -151,8 +156,11 @@ const ModernCarScanner: React.FC = () => {
 
   const scanForELM327 = useCallback(async () => {
     try {
-      await BleManager.scan([], 15, true);
+      setIsScanning(true);
+      startScanAnimation();
       setStatus('🔍 Активное сканирование...');
+
+      await BleManager.scan([], 15, true);
 
       setTimeout(async () => {
         const foundDevices = await BleManager.getDiscoveredPeripherals();
@@ -167,6 +175,8 @@ const ModernCarScanner: React.FC = () => {
         );
 
         setDevices(elm327Devices);
+        setIsScanning(false);
+        stopScanAnimation();
 
         if (elm327Devices.length === 0) {
           setStatus('❌ ELM327 адаптеры не обнаружены');
@@ -175,9 +185,11 @@ const ModernCarScanner: React.FC = () => {
         }
       }, 15000);
     } catch (error) {
+      setIsScanning(false);
+      stopScanAnimation();
       setStatus('❌ Ошибка сканирования');
     }
-  }, []);
+  }, [startScanAnimation, stopScanAnimation]);
 
   const connectToELM327 = async (deviceId: string) => {
     try {
@@ -202,6 +214,15 @@ const ModernCarScanner: React.FC = () => {
       );
     }
   };
+
+  const disconnectDevice = useCallback(() => {
+    setIsConnected(false);
+    setConnectedDevice(null);
+    setDevices([]); // Очищаем список устройств при отключении
+    setStatus('Готов к сканированию');
+    setIsScanning(false);
+    stopScanAnimation();
+  }, [stopScanAnimation]);
 
   const sendCommand = async (cmd: string) => {
     if (!connectedDevice || !cmd.trim()) return;
@@ -232,13 +253,61 @@ const ModernCarScanner: React.FC = () => {
     }
   };
 
+  // Компонент кольца сканирования
+  const ScanningRing = () => (
+    <Animated.View
+      style={[
+        styles.scanningRing,
+        {
+          transform: [
+            {
+              rotate: scanAnimation.interpolate({
+                inputRange: [0, 1],
+                outputRange: ['0deg', '360deg'],
+              }),
+            },
+          ],
+        },
+      ]}
+    >
+      <View style={styles.scanningCenter}>
+        <Text style={styles.scanningIcon}>📡</Text>
+      </View>
+    </Animated.View>
+  );
+
+  // Компонент кнопки сканирования
+  const ScanButton = () => (
+    <TouchableOpacity
+      style={[
+        styles.scanButton,
+        devices.length > 0 && !isConnected ? styles.headerScanButton : {},
+      ]}
+      onPress={scanForELM327}
+      disabled={isScanning}
+    >
+      <Text
+        style={[
+          styles.scanButtonText,
+          devices.length > 0 && !isConnected ? styles.headerScanButtonText : {},
+        ]}
+      >
+        {isScanning ? '⏱️ Сканирование...' : '🔍 Сканировать'}
+      </Text>
+    </TouchableOpacity>
+  );
+
   const StatusIndicator = () => (
     <View style={styles.statusContainer}>
       <Animated.View
         style={[
           styles.statusIndicator,
           {
-            backgroundColor: isConnected ? '#00ff88' : '#ff6b6b',
+            backgroundColor: isConnected
+              ? '#00ff88'
+              : isScanning
+              ? '#ffaa00'
+              : '#ff6b6b',
             transform: [{ scale: isConnected ? pulseAnimation : 1 }],
           },
         ]}
@@ -251,7 +320,6 @@ const ModernCarScanner: React.FC = () => {
     const initialize = async () => {
       try {
         await BleManager.start({ showAlert: false });
-        scanForELM327();
       } catch (error) {
         setStatus('❌ Ошибка BLE');
       }
@@ -275,7 +343,7 @@ const ModernCarScanner: React.FC = () => {
 
     initialize();
     return () => listener.remove();
-  }, [addResponse, scanForELM327]);
+  }, [addResponse]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -286,34 +354,25 @@ const ModernCarScanner: React.FC = () => {
         <Text style={styles.title}>Car Scanner</Text>
         <Text style={styles.subtitle}>Professional OBD2 Diagnostics</Text>
         <StatusIndicator />
+
+        {/* Хедер с кнопкой сканирования и кольцом когда есть найденные устройства */}
+        {devices.length > 0 && !isConnected && (
+          <View style={styles.headerControls}>
+            {isScanning && <ScanningRing />}
+            <ScanButton />
+          </View>
+        )}
       </View>
 
       {!isConnected ? (
         <View style={styles.scanningContainer}>
-          {/* Scanning Animation */}
-          <Animated.View
-            style={[
-              styles.scanningRing,
-              {
-                transform: [
-                  {
-                    rotate: scanAnimation.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: ['0deg', '360deg'],
-                    }),
-                  },
-                ],
-              },
-            ]}
-          >
-            <View style={styles.scanningCenter}>
-              <Text style={styles.scanningIcon}>📡</Text>
-            </View>
-          </Animated.View>
-
-          <TouchableOpacity style={styles.scanButton} onPress={scanForELM327}>
-            <Text style={styles.scanButtonText}>🔍 Сканировать устройства</Text>
-          </TouchableOpacity>
+          {/* Показываем кольцо и кнопку в центре только если нет найденных устройств */}
+          {devices.length === 0 && (
+            <>
+              {isScanning && <ScanningRing />}
+              <ScanButton />
+            </>
+          )}
 
           {/* Devices List */}
           <FlatList
@@ -326,15 +385,17 @@ const ModernCarScanner: React.FC = () => {
             showsVerticalScrollIndicator={false}
           />
 
-          {/* Help Section */}
-          <View style={styles.helpCard}>
-            <Text style={styles.helpTitle}>💡 Перед подключением:</Text>
-            <Text style={styles.helpText}>
-              • Заведите автомобиль{'\n'}• Подключите ELM327 к OBD порту{'\n'}•
-              Включите Bluetooth на устройстве{'\n'}• Убедитесь в совместимости
-              адаптера
-            </Text>
-          </View>
+          {/* Help Section - показываем только если нет устройств */}
+          {devices.length === 0 && (
+            <View style={styles.helpCard}>
+              <Text style={styles.helpTitle}>💡 Перед подключением:</Text>
+              <Text style={styles.helpText}>
+                • Заведите автомобиль{'\n'}• Подключите ELM327 к OBD порту{'\n'}
+                • Включите Bluetooth на устройстве{'\n'}• Убедитесь в
+                совместимости адаптера
+              </Text>
+            </View>
+          )}
         </View>
       ) : (
         <View style={styles.connectedContainer}>
@@ -372,11 +433,7 @@ const ModernCarScanner: React.FC = () => {
               <ActionButton
                 title="Отключить"
                 icon="🔌"
-                onPress={() => {
-                  setIsConnected(false);
-                  setConnectedDevice(null);
-                  setStatus('Отключено');
-                }}
+                onPress={disconnectDevice}
                 variant="danger"
               />
             </View>
@@ -442,6 +499,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '500',
   },
+  headerControls: {
+    alignItems: 'center',
+    marginTop: 10,
+  },
   scanningContainer: {
     flex: 1,
     padding: 20,
@@ -476,10 +537,21 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     marginTop: 30,
   },
+  headerScanButton: {
+    backgroundColor: '#333',
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    marginTop: 10,
+    borderRadius: 15,
+  },
   scanButtonText: {
     color: '#000',
     fontSize: 16,
     fontWeight: '600',
+  },
+  headerScanButtonText: {
+    color: '#00ff88',
+    fontSize: 12,
   },
   devicesList: {
     width: '100%',
