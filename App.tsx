@@ -6,34 +6,102 @@ import {
   FlatList,
   StyleSheet,
   View,
-  Alert,
   TextInput,
   ScrollView,
   DeviceEventEmitter,
   Animated,
-  Dimensions,
   StatusBar,
-  LinearGradient,
 } from 'react-native';
 import BleManager, { Peripheral } from 'react-native-ble-manager';
 
-const { width, height } = Dimensions.get('window');
+// Типы для TypeScript
+interface TestCommands {
+  quickTest: string[];
+  initialization: string[];
+  basicData: string[];
+  info: string[];
+}
+
+interface DeviceCardProps {
+  item: Peripheral;
+  onConnect: (deviceId: string) => void;
+}
+
+interface ActionButtonProps {
+  title: string;
+  onPress: () => void;
+  icon: string;
+  variant?: 'primary' | 'secondary' | 'danger';
+}
 
 // Импортируем наши реальные команды
-const REAL_TEST_COMMANDS = {
+const REAL_TEST_COMMANDS: TestCommands = {
   quickTest: ['ATZ', 'ATE0', 'ATSP0', '0100', '010C', '010D'],
   initialization: ['ATZ', 'ATE0', 'ATL0', 'ATS0', 'ATSP0'],
   basicData: ['010C', '010D', '0105', '010F', '0111'],
   info: ['ATI', 'ATRV', 'ATDP', '0902'],
 };
 
-const ModernCarScanner = () => {
-  const [devices, setDevices] = useState([]);
-  const [connectedDevice, setConnectedDevice] = useState(null);
-  const [status, setStatus] = useState('Сканирование ELM327 адаптеров...');
-  const [command, setCommand] = useState('');
-  const [responses, setResponses] = useState([]);
-  const [isConnected, setIsConnected] = useState(false);
+// Компоненты вынесены за пределы основного компонента для оптимизации
+const DeviceCard: React.FC<DeviceCardProps> = ({ item, onConnect }) => (
+  <TouchableOpacity
+    style={styles.deviceCard}
+    onPress={() => onConnect(item.id)}
+    activeOpacity={0.8}
+  >
+    <View style={styles.deviceHeader}>
+      <View style={styles.deviceIcon}>
+        <Text style={styles.deviceIconText}>🚗</Text>
+      </View>
+      <View style={styles.deviceInfo}>
+        <Text style={styles.deviceName}>{item.name || 'ELM327 Device'}</Text>
+        <Text style={styles.deviceId}>{item.id.substring(0, 17)}...</Text>
+        {item.rssi && (
+          <Text style={styles.deviceRssi}>Сигнал: {item.rssi} dBm</Text>
+        )}
+      </View>
+    </View>
+    <View style={styles.connectButton}>
+      <Text style={styles.connectButtonText}>Подключить</Text>
+    </View>
+  </TouchableOpacity>
+);
+
+const ActionButton: React.FC<ActionButtonProps> = ({
+  title,
+  onPress,
+  icon,
+  variant = 'primary',
+}) => (
+  <TouchableOpacity
+    style={[
+      styles.actionButton,
+      styles[`${variant}Button` as keyof typeof styles],
+    ]}
+    onPress={onPress}
+    activeOpacity={0.8}
+  >
+    <Text style={styles.actionButtonIcon}>{icon}</Text>
+    <Text
+      style={[
+        styles.actionButtonText,
+        styles[`${variant}ButtonText` as keyof typeof styles],
+      ]}
+    >
+      {title}
+    </Text>
+  </TouchableOpacity>
+);
+
+const ModernCarScanner: React.FC = () => {
+  const [devices, setDevices] = useState<Peripheral[]>([]);
+  const [connectedDevice, setConnectedDevice] = useState<string | null>(null);
+  const [status, setStatus] = useState<string>(
+    'Сканирование ELM327 адаптеров...',
+  );
+  const [command, setCommand] = useState<string>('');
+  const [responses, setResponses] = useState<string[]>([]);
+  const [isConnected, setIsConnected] = useState<boolean>(false);
   const [scanAnimation] = useState(new Animated.Value(0));
   const [pulseAnimation] = useState(new Animated.Value(1));
 
@@ -72,9 +140,9 @@ const ModernCarScanner = () => {
 
     startScanAnimation();
     startPulseAnimation();
-  }, []);
+  }, [scanAnimation, pulseAnimation]);
 
-  const addResponse = useCallback(response => {
+  const addResponse = useCallback((response: string) => {
     setResponses(prev => [
       ...prev.slice(-50), // Последние 50 сообщений
       `${new Date().toLocaleTimeString()}: ${response}`,
@@ -89,7 +157,7 @@ const ModernCarScanner = () => {
       setTimeout(async () => {
         const foundDevices = await BleManager.getDiscoveredPeripherals();
         const elm327Devices = foundDevices.filter(
-          device =>
+          (device: Peripheral) =>
             device.name &&
             (device.name.toLowerCase().includes('elm327') ||
               device.name.toLowerCase().includes('obd') ||
@@ -111,7 +179,7 @@ const ModernCarScanner = () => {
     }
   }, []);
 
-  const connectToELM327 = async deviceId => {
+  const connectToELM327 = async (deviceId: string) => {
     try {
       setStatus('🔗 Подключение...');
       await BleManager.connect(deviceId);
@@ -120,59 +188,47 @@ const ModernCarScanner = () => {
 
       setConnectedDevice(deviceId);
       setIsConnected(true);
-      setStatus('✅ Подключено успешно');
-      addResponse('=== СОЕДИНЕНИЕ УСТАНОВЛЕНО ===');
+      setStatus('✅ Подключено к ELM327');
+      addResponse('✅ Успешное подключение к адаптеру');
+
+      // Автоматическая инициализация
+      await runQuickTest();
     } catch (error) {
       setStatus('❌ Ошибка подключения');
-      Alert.alert('Ошибка', 'Не удалось подключиться к устройству');
+      addResponse(
+        `❌ Ошибка: ${
+          error instanceof Error ? error.message : 'Неизвестная ошибка'
+        }`,
+      );
     }
   };
 
-  const sendCommand = async cmd => {
-    if (!connectedDevice || !isConnected) {
-      Alert.alert('Ошибка', 'Сначала подключитесь к ELM327');
-      return;
-    }
+  const sendCommand = async (cmd: string) => {
+    if (!connectedDevice || !cmd.trim()) return;
 
     try {
-      const commandWithCR = cmd.trim() + '\r';
-      const data = Array.from(commandWithCR).map(char => char.charCodeAt(0));
-
+      addResponse(`📤 ${cmd.trim()}`);
+      const buffer = Buffer.from(cmd.trim() + '\r');
       await BleManager.write(
         connectedDevice,
         SERVICE_UUID,
         RX_UUID,
-        data,
-        data.length,
+        Array.from(buffer),
       );
-      addResponse(`📤 ${cmd}`);
-      setCommand('');
     } catch (error) {
-      Alert.alert('Ошибка отправки', error.message);
+      addResponse(
+        `❌ Ошибка отправки: ${
+          error instanceof Error ? error.message : 'Неизвестная ошибка'
+        }`,
+      );
     }
   };
 
   const runQuickTest = async () => {
-    addResponse('\n🚗 === БЫСТРАЯ ДИАГНОСТИКА ===');
-    REAL_TEST_COMMANDS.quickTest.forEach((cmd, index) => {
-      setTimeout(() => {
-        addResponse(`🔧 Выполнение: ${cmd}`);
-        sendCommand(cmd);
-      }, index * 2000);
-    });
-  };
-
-  const disconnect = async () => {
-    if (connectedDevice) {
-      try {
-        await BleManager.disconnect(connectedDevice);
-        setConnectedDevice(null);
-        setIsConnected(false);
-        setStatus('Отключено');
-        addResponse('=== СОЕДИНЕНИЕ РАЗОРВАНО ===');
-      } catch (error) {
-        console.log('Disconnect error:', error);
-      }
+    addResponse('🚀 Запуск быстрого теста...');
+    for (const cmd of REAL_TEST_COMMANDS.quickTest) {
+      await sendCommand(cmd);
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
   };
 
@@ -191,43 +247,6 @@ const ModernCarScanner = () => {
     </View>
   );
 
-  const DeviceCard = ({ item }) => (
-    <TouchableOpacity
-      style={styles.deviceCard}
-      onPress={() => connectToELM327(item.id)}
-      activeOpacity={0.8}
-    >
-      <View style={styles.deviceHeader}>
-        <View style={styles.deviceIcon}>
-          <Text style={styles.deviceIconText}>🚗</Text>
-        </View>
-        <View style={styles.deviceInfo}>
-          <Text style={styles.deviceName}>{item.name || 'ELM327 Device'}</Text>
-          <Text style={styles.deviceId}>{item.id.substring(0, 17)}...</Text>
-          {item.rssi && (
-            <Text style={styles.deviceRssi}>Сигнал: {item.rssi} dBm</Text>
-          )}
-        </View>
-      </View>
-      <View style={styles.connectButton}>
-        <Text style={styles.connectButtonText}>Подключить</Text>
-      </View>
-    </TouchableOpacity>
-  );
-
-  const ActionButton = ({ title, onPress, icon, variant = 'primary' }) => (
-    <TouchableOpacity
-      style={[styles.actionButton, styles[`${variant}Button`]]}
-      onPress={onPress}
-      activeOpacity={0.8}
-    >
-      <Text style={styles.actionButtonIcon}>{icon}</Text>
-      <Text style={[styles.actionButtonText, styles[`${variant}ButtonText`]]}>
-        {title}
-      </Text>
-    </TouchableOpacity>
-  );
-
   useEffect(() => {
     const initialize = async () => {
       try {
@@ -240,7 +259,13 @@ const ModernCarScanner = () => {
 
     const listener = DeviceEventEmitter.addListener(
       'BleManagerDidUpdateValueForCharacteristic',
-      ({ characteristic, value }) => {
+      ({
+        characteristic,
+        value,
+      }: {
+        characteristic: string;
+        value: number[];
+      }) => {
         if (characteristic === TX_UUID) {
           const response = String.fromCharCode(...value);
           addResponse(`📥 ${response.trim()}`);
@@ -293,8 +318,10 @@ const ModernCarScanner = () => {
           {/* Devices List */}
           <FlatList
             data={devices}
-            keyExtractor={item => item.id}
-            renderItem={({ item }) => <DeviceCard item={item} />}
+            keyExtractor={(item: Peripheral) => item.id}
+            renderItem={({ item }) => (
+              <DeviceCard item={item} onConnect={connectToELM327} />
+            )}
             style={styles.devicesList}
             showsVerticalScrollIndicator={false}
           />
@@ -325,44 +352,39 @@ const ModernCarScanner = () => {
                 style={styles.sendButton}
                 onPress={() => sendCommand(command)}
               >
-                <Text style={styles.sendButtonText}>▶</Text>
+                <Text style={styles.sendButtonText}>📤</Text>
               </TouchableOpacity>
             </View>
-          </View>
 
-          {/* Action Buttons */}
-          <View style={styles.actionsGrid}>
-            <ActionButton
-              title="Быстрый тест"
-              icon="⚡"
-              onPress={runQuickTest}
-              variant="primary"
-            />
-            <ActionButton
-              title="Диагностика"
-              icon="🔧"
-              onPress={() => {
-                /* TODO */
-              }}
-              variant="secondary"
-            />
-            <ActionButton
-              title="Очистить лог"
-              icon="🗑️"
-              onPress={() => setResponses([])}
-              variant="tertiary"
-            />
-            <ActionButton
-              title="Отключить"
-              icon="❌"
-              onPress={disconnect}
-              variant="danger"
-            />
+            {/* Quick Actions */}
+            <View style={styles.quickActions}>
+              <ActionButton
+                title="Быстрый тест"
+                icon="⚡"
+                onPress={runQuickTest}
+              />
+              <ActionButton
+                title="Очистить лог"
+                icon="🗑️"
+                onPress={() => setResponses([])}
+                variant="secondary"
+              />
+              <ActionButton
+                title="Отключить"
+                icon="🔌"
+                onPress={() => {
+                  setIsConnected(false);
+                  setConnectedDevice(null);
+                  setStatus('Отключено');
+                }}
+                variant="danger"
+              />
+            </View>
           </View>
 
           {/* Response Log */}
           <View style={styles.logContainer}>
-            <Text style={styles.logTitle}>📊 Лог диагностики</Text>
+            <Text style={styles.logTitle}>📊 Лог ответов</Text>
             <ScrollView
               style={styles.logScroll}
               showsVerticalScrollIndicator={false}
@@ -386,35 +408,28 @@ const styles = StyleSheet.create({
     backgroundColor: '#0a0a0a',
   },
   header: {
-    paddingHorizontal: 24,
-    paddingVertical: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 15,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#333',
   },
   title: {
-    fontSize: 32,
+    fontSize: 28,
     fontWeight: 'bold',
     color: '#ffffff',
     textAlign: 'center',
   },
   subtitle: {
     fontSize: 14,
-    color: '#64d2ff',
+    color: '#888',
     textAlign: 'center',
-    marginTop: 4,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
+    marginTop: 5,
   },
   statusContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 16,
-    padding: 12,
-    backgroundColor: '#111111',
-    borderRadius: 25,
-    borderWidth: 1,
-    borderColor: '#333333',
+    marginTop: 15,
   },
   statusIndicator: {
     width: 12,
@@ -429,7 +444,7 @@ const styles = StyleSheet.create({
   },
   scanningContainer: {
     flex: 1,
-    padding: 24,
+    padding: 20,
     alignItems: 'center',
   },
   scanningRing: {
@@ -437,11 +452,11 @@ const styles = StyleSheet.create({
     height: 120,
     borderRadius: 60,
     borderWidth: 3,
-    borderColor: '#64d2ff',
+    borderColor: '#00ff88',
     borderTopColor: 'transparent',
     justifyContent: 'center',
     alignItems: 'center',
-    marginVertical: 32,
+    marginTop: 30,
   },
   scanningCenter: {
     width: 80,
@@ -452,175 +467,168 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   scanningIcon: {
-    fontSize: 32,
+    fontSize: 30,
   },
   scanButton: {
-    backgroundColor: '#64d2ff',
-    paddingHorizontal: 32,
-    paddingVertical: 16,
+    backgroundColor: '#00ff88',
+    paddingHorizontal: 25,
+    paddingVertical: 15,
     borderRadius: 25,
-    marginBottom: 24,
+    marginTop: 30,
   },
   scanButtonText: {
-    color: '#000000',
+    color: '#000',
     fontSize: 16,
-    fontWeight: 'bold',
+    fontWeight: '600',
   },
   devicesList: {
     width: '100%',
-    marginBottom: 20,
+    marginTop: 20,
   },
   deviceCard: {
     backgroundColor: '#1a1a1a',
-    borderRadius: 16,
-    padding: 20,
-    marginVertical: 8,
-    borderWidth: 1,
-    borderColor: '#333333',
+    borderRadius: 15,
+    padding: 15,
+    marginBottom: 10,
+    borderLeftWidth: 4,
+    borderLeftColor: '#00ff88',
   },
   deviceHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
   },
   deviceIcon: {
     width: 50,
     height: 50,
     borderRadius: 25,
-    backgroundColor: '#64d2ff20',
+    backgroundColor: '#333',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 16,
+    marginRight: 15,
   },
   deviceIconText: {
-    fontSize: 24,
+    fontSize: 20,
   },
   deviceInfo: {
     flex: 1,
   },
   deviceName: {
     color: '#ffffff',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 4,
+    fontSize: 16,
+    fontWeight: '600',
   },
   deviceId: {
-    color: '#888888',
+    color: '#888',
     fontSize: 12,
-    marginBottom: 2,
+    marginTop: 2,
   },
   deviceRssi: {
-    color: '#64d2ff',
-    fontSize: 12,
+    color: '#00ff88',
+    fontSize: 11,
+    marginTop: 2,
   },
   connectButton: {
     backgroundColor: '#00ff88',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderRadius: 15,
+    alignSelf: 'flex-end',
+    marginTop: 10,
   },
   connectButtonText: {
-    color: '#000000',
-    fontWeight: 'bold',
-    fontSize: 16,
+    color: '#000',
+    fontSize: 12,
+    fontWeight: '600',
   },
   helpCard: {
     backgroundColor: '#1a1a1a',
-    borderRadius: 16,
+    borderRadius: 15,
     padding: 20,
+    marginTop: 20,
     width: '100%',
-    borderWidth: 1,
-    borderColor: '#333333',
+    borderLeftWidth: 4,
+    borderLeftColor: '#ffaa00',
   },
   helpTitle: {
-    color: '#64d2ff',
+    color: '#ffaa00',
     fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 12,
+    fontWeight: '600',
+    marginBottom: 10,
   },
   helpText: {
-    color: '#cccccc',
+    color: '#ccc',
     fontSize: 14,
-    lineHeight: 22,
+    lineHeight: 20,
   },
   connectedContainer: {
     flex: 1,
-    padding: 24,
+    padding: 20,
   },
   commandSection: {
-    marginBottom: 24,
+    marginBottom: 20,
   },
   commandInputContainer: {
     flexDirection: 'row',
-    alignItems: 'center',
+    backgroundColor: '#1a1a1a',
+    borderRadius: 15,
+    padding: 5,
+    borderWidth: 1,
+    borderColor: '#333',
   },
   commandInput: {
     flex: 1,
-    backgroundColor: '#1a1a1a',
-    borderRadius: 12,
-    padding: 16,
     color: '#ffffff',
     fontSize: 16,
-    marginRight: 12,
-    borderWidth: 1,
-    borderColor: '#333333',
+    paddingHorizontal: 15,
+    paddingVertical: 12,
   },
   sendButton: {
-    backgroundColor: '#64d2ff',
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    backgroundColor: '#00ff88',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 10,
     justifyContent: 'center',
     alignItems: 'center',
   },
   sendButtonText: {
-    color: '#000000',
     fontSize: 18,
-    fontWeight: 'bold',
   },
-  actionsGrid: {
+  quickActions: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     justifyContent: 'space-between',
-    marginBottom: 24,
+    marginTop: 15,
   },
   actionButton: {
-    width: '48%',
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    marginBottom: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    marginHorizontal: 3,
   },
   primaryButton: {
-    backgroundColor: '#64d2ff',
-  },
-  secondaryButton: {
     backgroundColor: '#00ff88',
   },
-  tertiaryButton: {
-    backgroundColor: '#888888',
+  secondaryButton: {
+    backgroundColor: '#333',
   },
   dangerButton: {
     backgroundColor: '#ff6b6b',
   },
   actionButtonIcon: {
-    fontSize: 18,
-    marginRight: 8,
+    fontSize: 16,
+    marginRight: 5,
   },
   actionButtonText: {
-    fontSize: 14,
-    fontWeight: 'bold',
+    fontSize: 12,
+    fontWeight: '600',
   },
   primaryButtonText: {
-    color: '#000000',
+    color: '#000',
   },
   secondaryButtonText: {
-    color: '#000000',
-  },
-  tertiaryButtonText: {
     color: '#ffffff',
   },
   dangerButtonText: {
@@ -629,27 +637,26 @@ const styles = StyleSheet.create({
   logContainer: {
     flex: 1,
     backgroundColor: '#1a1a1a',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#333333',
+    borderRadius: 15,
+    padding: 15,
   },
   logTitle: {
-    color: '#64d2ff',
+    color: '#00ff88',
     fontSize: 16,
-    fontWeight: 'bold',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#333333',
+    fontWeight: '600',
+    marginBottom: 10,
   },
   logScroll: {
     flex: 1,
-    padding: 16,
   },
   logText: {
-    color: '#00ff88',
+    color: '#ffffff',
     fontSize: 12,
-    fontFamily: 'monospace',
-    marginBottom: 4,
+    fontFamily: 'Courier',
+    marginBottom: 5,
+    backgroundColor: '#0a0a0a',
+    padding: 8,
+    borderRadius: 5,
   },
 });
 
