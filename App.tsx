@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import {
   SafeAreaView,
   Text,
-  Button,
+  TouchableOpacity,
   FlatList,
   StyleSheet,
   View,
@@ -10,8 +10,14 @@ import {
   TextInput,
   ScrollView,
   DeviceEventEmitter,
+  Animated,
+  Dimensions,
+  StatusBar,
+  LinearGradient,
 } from 'react-native';
 import BleManager, { Peripheral } from 'react-native-ble-manager';
+
+const { width, height } = Dimensions.get('window');
 
 // Импортируем наши реальные команды
 const REAL_TEST_COMMANDS = {
@@ -21,22 +27,56 @@ const REAL_TEST_COMMANDS = {
   info: ['ATI', 'ATRV', 'ATDP', '0902'],
 };
 
-const RealCarTestApp: React.FC = () => {
-  const [devices, setDevices] = useState<Peripheral[]>([]);
-  const [connectedDevice, setConnectedDevice] = useState<string | null>(null);
-  const [status, setStatus] = useState('Поиск ELM327 адаптеров...');
-  const [command, setCommand] = useState('ATZ');
-  const [responses, setResponses] = useState<string[]>([]);
+const ModernCarScanner = () => {
+  const [devices, setDevices] = useState([]);
+  const [connectedDevice, setConnectedDevice] = useState(null);
+  const [status, setStatus] = useState('Сканирование ELM327 адаптеров...');
+  const [command, setCommand] = useState('');
+  const [responses, setResponses] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
-  const [_testResults, _setTestResults] = useState<any>({});
+  const [scanAnimation] = useState(new Animated.Value(0));
+  const [pulseAnimation] = useState(new Animated.Value(1));
 
   const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-  const RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // iOS → ELM327
-  const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // ELM327 → iOS
+  const RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+  const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
-  const addResponse = useCallback((response: string) => {
+  // Анимации
+  useEffect(() => {
+    const startScanAnimation = () => {
+      Animated.loop(
+        Animated.timing(scanAnimation, {
+          toValue: 1,
+          duration: 2000,
+          useNativeDriver: false,
+        }),
+      ).start();
+    };
+
+    const startPulseAnimation = () => {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnimation, {
+            toValue: 1.1,
+            duration: 1000,
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulseAnimation, {
+            toValue: 1,
+            duration: 1000,
+            useNativeDriver: true,
+          }),
+        ]),
+      ).start();
+    };
+
+    startScanAnimation();
+    startPulseAnimation();
+  }, []);
+
+  const addResponse = useCallback(response => {
     setResponses(prev => [
-      ...prev,
+      ...prev.slice(-50), // Последние 50 сообщений
       `${new Date().toLocaleTimeString()}: ${response}`,
     ]);
   }, []);
@@ -44,103 +84,51 @@ const RealCarTestApp: React.FC = () => {
   const scanForELM327 = useCallback(async () => {
     try {
       await BleManager.scan([], 15, true);
+      setStatus('🔍 Активное сканирование...');
 
       setTimeout(async () => {
         const foundDevices = await BleManager.getDiscoveredPeripherals();
-
-        // Ищем устройства которые могут быть ELM327
         const elm327Devices = foundDevices.filter(
           device =>
             device.name &&
             (device.name.toLowerCase().includes('elm327') ||
               device.name.toLowerCase().includes('obd') ||
               device.name.toLowerCase().includes('can') ||
-              device.name.toLowerCase().includes('car') ||
-              device.name.toLowerCase().includes('auto') ||
-              device.name.toLowerCase().includes('obdii') ||
-              device.name.toLowerCase().includes('elm') ||
-              // Популярные китайские адаптеры:
               device.name.toLowerCase().includes('vgate') ||
-              device.name.toLowerCase().includes('veepeak') ||
-              device.name.toLowerCase().includes('obdlink')),
+              device.name.toLowerCase().includes('veepeak')),
         );
 
         setDevices(elm327Devices);
-        setStatus(`Найдено потенциальных ELM327: ${elm327Devices.length}`);
 
         if (elm327Devices.length === 0) {
-          setStatus(
-            '❌ ELM327 адаптеры не найдены. Убедитесь что адаптер включен и в режиме сопряжения.',
-          );
+          setStatus('❌ ELM327 адаптеры не обнаружены');
+        } else {
+          setStatus(`✨ Найдено адаптеров: ${elm327Devices.length}`);
         }
       }, 15000);
-    } catch (error: any) {
-      setStatus('Ошибка сканирования: ' + error.message);
+    } catch (error) {
+      setStatus('❌ Ошибка сканирования');
     }
   }, []);
 
-  useEffect(() => {
-    const initialize = async () => {
-      try {
-        await BleManager.start({ showAlert: false });
-        setStatus('🔍 Сканирование ELM327 адаптеров...');
-        scanForELM327();
-      } catch (error: any) {
-        setStatus('❌ Ошибка BLE: ' + error.message);
-      }
-    };
-
-    // Добавляем listener для ответов от ELM327
-    const listener = DeviceEventEmitter.addListener(
-      'BleManagerDidUpdateValueForCharacteristic',
-      ({
-        characteristic,
-        value,
-      }: {
-        characteristic: string;
-        value: number[];
-      }) => {
-        if (characteristic === TX_UUID) {
-          const response = String.fromCharCode(...value);
-          addResponse(`ELM327: ${response.trim()}`);
-        }
-      },
-    );
-
-    initialize();
-
-    // Очистка при размонтировании компонента
-    return () => listener.remove();
-  }, [addResponse, scanForELM327]);
-
-  const connectToELM327 = async (deviceId: string) => {
+  const connectToELM327 = async deviceId => {
     try {
-      setStatus('🔌 Подключение к ELM327...');
-      addResponse(`Подключение к устройству: ${deviceId}`);
-
+      setStatus('🔗 Подключение...');
       await BleManager.connect(deviceId);
       await BleManager.retrieveServices(deviceId);
-
-      // Подписываемся на уведомления от ELM327
       await BleManager.startNotification(deviceId, SERVICE_UUID, TX_UUID);
 
       setConnectedDevice(deviceId);
       setIsConnected(true);
-      setStatus('✅ Подключено к ELM327! Готов к тестированию.');
-
-      addResponse('=== ПОДКЛЮЧЕНИЕ УСТАНОВЛЕНО ===');
-      addResponse('⚠️  УБЕДИТЕСЬ ЧТО МАШИНА ЗАВЕДЕНА!');
-      addResponse('⚠️  ELM327 ПОДКЛЮЧЕН К OBD ПОРТУ!');
-    } catch (error: any) {
-      setStatus('❌ Ошибка подключения: ' + error.message);
-      Alert.alert(
-        'Ошибка подключения',
-        'Не удалось подключиться к ELM327. Проверьте что устройство поддерживает BLE и находится в режиме сопряжения.',
-      );
+      setStatus('✅ Подключено успешно');
+      addResponse('=== СОЕДИНЕНИЕ УСТАНОВЛЕНО ===');
+    } catch (error) {
+      setStatus('❌ Ошибка подключения');
+      Alert.alert('Ошибка', 'Не удалось подключиться к устройству');
     }
   };
 
-  const sendRealCommand = async (cmd: string) => {
+  const sendCommand = async cmd => {
     if (!connectedDevice || !isConnected) {
       Alert.alert('Ошибка', 'Сначала подключитесь к ELM327');
       return;
@@ -157,125 +145,21 @@ const RealCarTestApp: React.FC = () => {
         data,
         data.length,
       );
-
-      addResponse(`ОТПРАВЛЕНО: ${cmd}`);
+      addResponse(`📤 ${cmd}`);
       setCommand('');
-    } catch (error: any) {
+    } catch (error) {
       Alert.alert('Ошибка отправки', error.message);
-      addResponse(`ОШИБКА: ${error.message}`);
     }
   };
 
   const runQuickTest = async () => {
-    addResponse('\n🚗 === БЫСТРЫЙ ТЕСТ ELM327 В МАШИНЕ ===');
-    addResponse('Проверяем основные функции...\n');
-
-    for (let i = 0; i < REAL_TEST_COMMANDS.quickTest.length; i++) {
-      const cmd = REAL_TEST_COMMANDS.quickTest[i];
-
+    addResponse('\n🚗 === БЫСТРАЯ ДИАГНОСТИКА ===');
+    REAL_TEST_COMMANDS.quickTest.forEach((cmd, index) => {
       setTimeout(() => {
-        let description = '';
-        switch (cmd) {
-          case 'ATZ':
-            description = '(Сброс ELM327)';
-            break;
-          case 'ATE0':
-            description = '(Отключить эхо)';
-            break;
-          case 'ATSP0':
-            description = '(Авто протокол)';
-            break;
-          case '0100':
-            description = '(Проверка связи с ECU)';
-            break;
-          case '010C':
-            description = '(Обороты двигателя)';
-            break;
-          case '010D':
-            description = '(Скорость автомобиля)';
-            break;
-        }
-
-        addResponse(`\n>>> Тест ${i + 1}/6: ${cmd} ${description}`);
-        sendRealCommand(cmd);
-      }, i * 2000);
-    }
-  };
-
-  const runFullDiagnostic = async () => {
-    addResponse('\n🔧 === ПОЛНАЯ ДИАГНОСТИКА АВТОМОБИЛЯ ===');
-    addResponse('Считываем все доступные данные...\n');
-
-    const allCommands = [
-      // Инициализация
-      ...REAL_TEST_COMMANDS.initialization,
-      // Базовые данные
-      '0100',
-      '0120',
-      '0140', // Поддерживаемые PID
-      '010C',
-      '010D',
-      '0105',
-      '010F',
-      '0111', // Данные двигателя
-      '010A',
-      '0142',
-      '0143', // Дополнительные данные
-      // Информация
-      'ATI',
-      'ATRV',
-      'ATDP',
-      // VIN и ошибки
-      '0902',
-      '03',
-      '07',
-    ];
-
-    allCommands.forEach((cmd, index) => {
-      setTimeout(() => {
-        addResponse(`\n>>> Команда ${index + 1}/${allCommands.length}: ${cmd}`);
-        sendRealCommand(cmd);
-      }, index * 1500);
+        addResponse(`🔧 Выполнение: ${cmd}`);
+        sendCommand(cmd);
+      }, index * 2000);
     });
-  };
-
-  const _parseELM327Response = (response: string, cmd: string) => {
-    // Парсим реальные ответы от ELM327
-    let parsed = '';
-
-    if (cmd === '010C' && response.includes('41 0C')) {
-      // RPM расчет
-      const match = response.match(/41 0C ([A-F0-9]{2}) ([A-F0-9]{2})/);
-      if (match) {
-        const A = parseInt(match[1], 16);
-        const B = parseInt(match[2], 16);
-        const rpm = (A * 256 + B) / 4;
-        parsed = `RPM: ${rpm} об/мин`;
-      }
-    } else if (cmd === '010D' && response.includes('41 0D')) {
-      // Скорость
-      const match = response.match(/41 0D ([A-F0-9]{2})/);
-      if (match) {
-        const speed = parseInt(match[1], 16);
-        parsed = `Скорость: ${speed} км/ч`;
-      }
-    } else if (cmd === '0105' && response.includes('41 05')) {
-      // Температура охлаждающей жидкости
-      const match = response.match(/41 05 ([A-F0-9]{2})/);
-      if (match) {
-        const temp = parseInt(match[1], 16) - 40;
-        parsed = `Температура ОЖ: ${temp}°C`;
-      }
-    } else if (cmd === '010F' && response.includes('41 0F')) {
-      // Температура воздуха
-      const match = response.match(/41 0F ([A-F0-9]{2})/);
-      if (match) {
-        const temp = parseInt(match[1], 16) - 40;
-        parsed = `Температура воздуха: ${temp}°C`;
-      }
-    }
-
-    return parsed;
   };
 
   const disconnect = async () => {
@@ -284,7 +168,7 @@ const RealCarTestApp: React.FC = () => {
         await BleManager.disconnect(connectedDevice);
         setConnectedDevice(null);
         setIsConnected(false);
-        setStatus('Отключено от ELM327');
+        setStatus('Отключено');
         addResponse('=== СОЕДИНЕНИЕ РАЗОРВАНО ===');
       } catch (error) {
         console.log('Disconnect error:', error);
@@ -292,92 +176,204 @@ const RealCarTestApp: React.FC = () => {
     }
   };
 
-  const clearLog = () => {
-    setResponses([]);
-  };
+  const StatusIndicator = () => (
+    <View style={styles.statusContainer}>
+      <Animated.View
+        style={[
+          styles.statusIndicator,
+          {
+            backgroundColor: isConnected ? '#00ff88' : '#ff6b6b',
+            transform: [{ scale: isConnected ? pulseAnimation : 1 }],
+          },
+        ]}
+      />
+      <Text style={styles.statusText}>{status}</Text>
+    </View>
+  );
+
+  const DeviceCard = ({ item }) => (
+    <TouchableOpacity
+      style={styles.deviceCard}
+      onPress={() => connectToELM327(item.id)}
+      activeOpacity={0.8}
+    >
+      <View style={styles.deviceHeader}>
+        <View style={styles.deviceIcon}>
+          <Text style={styles.deviceIconText}>🚗</Text>
+        </View>
+        <View style={styles.deviceInfo}>
+          <Text style={styles.deviceName}>{item.name || 'ELM327 Device'}</Text>
+          <Text style={styles.deviceId}>{item.id.substring(0, 17)}...</Text>
+          {item.rssi && (
+            <Text style={styles.deviceRssi}>Сигнал: {item.rssi} dBm</Text>
+          )}
+        </View>
+      </View>
+      <View style={styles.connectButton}>
+        <Text style={styles.connectButtonText}>Подключить</Text>
+      </View>
+    </TouchableOpacity>
+  );
+
+  const ActionButton = ({ title, onPress, icon, variant = 'primary' }) => (
+    <TouchableOpacity
+      style={[styles.actionButton, styles[`${variant}Button`]]}
+      onPress={onPress}
+      activeOpacity={0.8}
+    >
+      <Text style={styles.actionButtonIcon}>{icon}</Text>
+      <Text style={[styles.actionButtonText, styles[`${variant}ButtonText`]]}>
+        {title}
+      </Text>
+    </TouchableOpacity>
+  );
+
+  useEffect(() => {
+    const initialize = async () => {
+      try {
+        await BleManager.start({ showAlert: false });
+        scanForELM327();
+      } catch (error) {
+        setStatus('❌ Ошибка BLE');
+      }
+    };
+
+    const listener = DeviceEventEmitter.addListener(
+      'BleManagerDidUpdateValueForCharacteristic',
+      ({ characteristic, value }) => {
+        if (characteristic === TX_UUID) {
+          const response = String.fromCharCode(...value);
+          addResponse(`📥 ${response.trim()}`);
+        }
+      },
+    );
+
+    initialize();
+    return () => listener.remove();
+  }, [addResponse, scanForELM327]);
 
   return (
     <SafeAreaView style={styles.container}>
-      <Text style={styles.title}>🚗 Реальный тест ELM327</Text>
-      <Text style={styles.subtitle}>Тестирование в настоящей машине</Text>
+      <StatusBar barStyle="light-content" backgroundColor="#0a0a0a" />
 
-      <Text style={styles.status}>{status}</Text>
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.title}>Car Scanner</Text>
+        <Text style={styles.subtitle}>Professional OBD2 Diagnostics</Text>
+        <StatusIndicator />
+      </View>
 
       {!isConnected ? (
-        <View>
-          <View style={styles.button}>
-            <Button title="🔍 Сканировать ELM327" onPress={scanForELM327} />
-          </View>
+        <View style={styles.scanningContainer}>
+          {/* Scanning Animation */}
+          <Animated.View
+            style={[
+              styles.scanningRing,
+              {
+                transform: [
+                  {
+                    rotate: scanAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: ['0deg', '360deg'],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          >
+            <View style={styles.scanningCenter}>
+              <Text style={styles.scanningIcon}>📡</Text>
+            </View>
+          </Animated.View>
 
+          <TouchableOpacity style={styles.scanButton} onPress={scanForELM327}>
+            <Text style={styles.scanButtonText}>🔍 Сканировать устройства</Text>
+          </TouchableOpacity>
+
+          {/* Devices List */}
           <FlatList
             data={devices}
             keyExtractor={item => item.id}
-            renderItem={({ item }) => (
-              <View style={styles.deviceContainer}>
-                <Text style={styles.deviceName}>
-                  🚗 {item.name || 'ELM327 Device'}
-                </Text>
-                <Text style={styles.deviceId}>ID: {item.id}</Text>
-                {item.rssi && (
-                  <Text style={styles.deviceRssi}>Сигнал: {item.rssi} dBm</Text>
-                )}
-                <Button
-                  title="🔌 Подключиться"
-                  onPress={() => connectToELM327(item.id)}
-                />
-              </View>
-            )}
+            renderItem={({ item }) => <DeviceCard item={item} />}
+            style={styles.devicesList}
+            showsVerticalScrollIndicator={false}
           />
 
-          <View style={styles.helpContainer}>
-            <Text style={styles.helpTitle}>⚠️ Перед тестированием:</Text>
+          {/* Help Section */}
+          <View style={styles.helpCard}>
+            <Text style={styles.helpTitle}>💡 Перед подключением:</Text>
             <Text style={styles.helpText}>
-              • Заведите машину (двигатель должен работать){'\n'}• Подключите
-              ELM327 к OBD порту{'\n'}• Убедитесь что ELM327 в режиме сопряжения
-              {'\n'}• Если не находит - попробуйте выключить/включить адаптер
+              • Заведите автомобиль{'\n'}• Подключите ELM327 к OBD порту{'\n'}•
+              Включите Bluetooth на устройстве{'\n'}• Убедитесь в совместимости
+              адаптера
             </Text>
           </View>
         </View>
       ) : (
         <View style={styles.connectedContainer}>
-          <Text style={styles.connectedText}>✅ Подключено к ELM327</Text>
-
-          <View style={styles.commandContainer}>
-            <TextInput
-              style={styles.commandInput}
-              value={command}
-              onChangeText={setCommand}
-              placeholder="OBD команда (ATZ, 010C, 010D)"
-              placeholderTextColor="#999"
-            />
-            <Button
-              title="Отправить"
-              onPress={() => sendRealCommand(command)}
-            />
+          {/* Command Input */}
+          <View style={styles.commandSection}>
+            <View style={styles.commandInputContainer}>
+              <TextInput
+                style={styles.commandInput}
+                value={command}
+                onChangeText={setCommand}
+                placeholder="Введите OBD команду..."
+                placeholderTextColor="#666"
+              />
+              <TouchableOpacity
+                style={styles.sendButton}
+                onPress={() => sendCommand(command)}
+              >
+                <Text style={styles.sendButtonText}>▶</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
-          <View style={styles.buttonRow}>
-            <Button title="⚡ Быстрый тест" onPress={runQuickTest} />
-            <Button title="🔧 Полная диагностика" onPress={runFullDiagnostic} />
-          </View>
-
-          <View style={styles.buttonRow}>
-            <Button title="🗑️ Очистить лог" onPress={clearLog} />
-            <Button
-              title="❌ Отключиться"
+          {/* Action Buttons */}
+          <View style={styles.actionsGrid}>
+            <ActionButton
+              title="Быстрый тест"
+              icon="⚡"
+              onPress={runQuickTest}
+              variant="primary"
+            />
+            <ActionButton
+              title="Диагностика"
+              icon="🔧"
+              onPress={() => {
+                /* TODO */
+              }}
+              variant="secondary"
+            />
+            <ActionButton
+              title="Очистить лог"
+              icon="🗑️"
+              onPress={() => setResponses([])}
+              variant="tertiary"
+            />
+            <ActionButton
+              title="Отключить"
+              icon="❌"
               onPress={disconnect}
-              color="#ff6b6b"
+              variant="danger"
             />
           </View>
 
-          <Text style={styles.responsesTitle}>📡 Лог общения с ELM327:</Text>
-          <ScrollView style={styles.responsesContainer}>
-            {responses.map((response, index) => (
-              <Text key={index} style={styles.responseText}>
-                {response}
-              </Text>
-            ))}
-          </ScrollView>
+          {/* Response Log */}
+          <View style={styles.logContainer}>
+            <Text style={styles.logTitle}>📊 Лог диагностики</Text>
+            <ScrollView
+              style={styles.logScroll}
+              showsVerticalScrollIndicator={false}
+            >
+              {responses.map((response, index) => (
+                <Text key={index} style={styles.logText}>
+                  {response}
+                </Text>
+              ))}
+            </ScrollView>
+          </View>
         </View>
       )}
     </SafeAreaView>
@@ -385,111 +381,276 @@ const RealCarTestApp: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16, backgroundColor: '#000' },
+  container: {
+    flex: 1,
+    backgroundColor: '#0a0a0a',
+  },
+  header: {
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a1a',
+  },
   title: {
-    fontSize: 22,
+    fontSize: 32,
     fontWeight: 'bold',
-    marginBottom: 8,
-    color: '#00ff00',
+    color: '#ffffff',
     textAlign: 'center',
   },
   subtitle: {
     fontSize: 14,
-    color: '#ffff00',
+    color: '#64d2ff',
     textAlign: 'center',
-    marginBottom: 16,
+    marginTop: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
   },
-  status: {
-    marginBottom: 16,
-    fontSize: 16,
-    color: '#00ffff',
-    textAlign: 'center',
-    backgroundColor: '#003333',
-    padding: 10,
-    borderRadius: 5,
-  },
-  button: { marginVertical: 8 },
-  deviceContainer: {
-    backgroundColor: '#001100',
+  statusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 16,
     padding: 12,
-    marginVertical: 4,
-    borderRadius: 8,
+    backgroundColor: '#111111',
+    borderRadius: 25,
     borderWidth: 1,
-    borderColor: '#00ff00',
+    borderColor: '#333333',
   },
-  deviceName: { fontSize: 16, fontWeight: '600', color: '#00ff00' },
-  deviceId: { fontSize: 14, color: '#cccccc', marginTop: 2 },
-  deviceRssi: { fontSize: 12, color: '#999999', marginTop: 2, marginBottom: 8 },
-  connectedContainer: { flex: 1 },
-  connectedText: {
+  statusIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  statusText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  scanningContainer: {
+    flex: 1,
+    padding: 24,
+    alignItems: 'center',
+  },
+  scanningRing: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    borderWidth: 3,
+    borderColor: '#64d2ff',
+    borderTopColor: 'transparent',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginVertical: 32,
+  },
+  scanningCenter: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#1a1a1a',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  scanningIcon: {
+    fontSize: 32,
+  },
+  scanButton: {
+    backgroundColor: '#64d2ff',
+    paddingHorizontal: 32,
+    paddingVertical: 16,
+    borderRadius: 25,
+    marginBottom: 24,
+  },
+  scanButtonText: {
+    color: '#000000',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  devicesList: {
+    width: '100%',
+    marginBottom: 20,
+  },
+  deviceCard: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 16,
+    padding: 20,
+    marginVertical: 8,
+    borderWidth: 1,
+    borderColor: '#333333',
+  },
+  deviceHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  deviceIcon: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#64d2ff20',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 16,
+  },
+  deviceIconText: {
+    fontSize: 24,
+  },
+  deviceInfo: {
+    flex: 1,
+  },
+  deviceName: {
+    color: '#ffffff',
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#00ff00',
-    textAlign: 'center',
-    marginBottom: 20,
-    backgroundColor: '#003300',
-    padding: 10,
-    borderRadius: 5,
+    marginBottom: 4,
   },
-  commandContainer: {
+  deviceId: {
+    color: '#888888',
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  deviceRssi: {
+    color: '#64d2ff',
+    fontSize: 12,
+  },
+  connectButton: {
+    backgroundColor: '#00ff88',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  connectButtonText: {
+    color: '#000000',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  helpCard: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 16,
+    padding: 20,
+    width: '100%',
+    borderWidth: 1,
+    borderColor: '#333333',
+  },
+  helpTitle: {
+    color: '#64d2ff',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 12,
+  },
+  helpText: {
+    color: '#cccccc',
+    fontSize: 14,
+    lineHeight: 22,
+  },
+  connectedContainer: {
+    flex: 1,
+    padding: 24,
+  },
+  commandSection: {
+    marginBottom: 24,
+  },
+  commandInputContainer: {
     flexDirection: 'row',
-    marginBottom: 10,
     alignItems: 'center',
   },
   commandInput: {
     flex: 1,
-    borderWidth: 1,
-    borderColor: '#333',
-    padding: 10,
-    marginRight: 10,
-    borderRadius: 5,
-    backgroundColor: '#111',
-    color: '#fff',
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: 10,
-  },
-  responsesTitle: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 12,
+    padding: 16,
+    color: '#ffffff',
     fontSize: 16,
+    marginRight: 12,
+    borderWidth: 1,
+    borderColor: '#333333',
+  },
+  sendButton: {
+    backgroundColor: '#64d2ff',
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sendButtonText: {
+    color: '#000000',
+    fontSize: 18,
     fontWeight: 'bold',
-    marginBottom: 8,
-    color: '#00ffff',
   },
-  responsesContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-    padding: 10,
-    borderRadius: 5,
-    borderWidth: 1,
-    borderColor: '#333',
+  actionsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    marginBottom: 24,
   },
-  responseText: {
-    color: '#00ff00',
-    fontFamily: 'Courier',
-    fontSize: 12,
-    marginBottom: 2,
+  actionButton: {
+    width: '48%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    marginBottom: 12,
   },
-  helpContainer: {
-    padding: 12,
-    backgroundColor: '#330000',
-    borderRadius: 8,
-    marginTop: 16,
-    borderWidth: 1,
-    borderColor: '#ff0000',
+  primaryButton: {
+    backgroundColor: '#64d2ff',
   },
-  helpTitle: {
+  secondaryButton: {
+    backgroundColor: '#00ff88',
+  },
+  tertiaryButton: {
+    backgroundColor: '#888888',
+  },
+  dangerButton: {
+    backgroundColor: '#ff6b6b',
+  },
+  actionButtonIcon: {
+    fontSize: 18,
+    marginRight: 8,
+  },
+  actionButtonText: {
     fontSize: 14,
     fontWeight: 'bold',
-    color: '#ff0000',
-    marginBottom: 4,
   },
-  helpText: {
+  primaryButtonText: {
+    color: '#000000',
+  },
+  secondaryButtonText: {
+    color: '#000000',
+  },
+  tertiaryButtonText: {
+    color: '#ffffff',
+  },
+  dangerButtonText: {
+    color: '#ffffff',
+  },
+  logContainer: {
+    flex: 1,
+    backgroundColor: '#1a1a1a',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#333333',
+  },
+  logTitle: {
+    color: '#64d2ff',
+    fontSize: 16,
+    fontWeight: 'bold',
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333333',
+  },
+  logScroll: {
+    flex: 1,
+    padding: 16,
+  },
+  logText: {
+    color: '#00ff88',
     fontSize: 12,
-    color: '#ffcccc',
-    lineHeight: 16,
+    fontFamily: 'monospace',
+    marginBottom: 4,
   },
 });
 
-export default RealCarTestApp;
+export default ModernCarScanner;
