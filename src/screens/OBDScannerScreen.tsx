@@ -11,6 +11,7 @@ import {
   PermissionsAndroid,
   Platform,
   DeviceEventEmitter,
+  EmitterSubscription,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
@@ -69,8 +70,56 @@ const OBDScannerScreen: React.FC = () => {
   const [scanAnimation] = useState(new Animated.Value(0));
   const [pulseAnimation] = useState(new Animated.Value(1));
 
+  // ELM327 Bluetooth LE UUID'ы (обычно используемые)
   const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
   const RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+
+  // Запрос разрешений для Android
+  const requestBluetoothPermissions = useCallback(async () => {
+    if (Platform.OS === 'android') {
+      try {
+        const permissions = [
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        ];
+
+        const granted = await PermissionsAndroid.requestMultiple(permissions);
+
+        const allGranted = Object.values(granted).every(
+          permission => permission === PermissionsAndroid.RESULTS.GRANTED,
+        );
+
+        if (!allGranted) {
+          Alert.alert(
+            'Разрешения не получены',
+            'Для работы с Bluetooth необходимы все разрешения',
+          );
+        }
+
+        console.log('Разрешения получены:', granted);
+      } catch (error) {
+        console.error('Ошибка получения разрешений:', error);
+      }
+    }
+  }, []);
+
+  // Инициализация BLE - обернута в useCallback
+  const initializeBLE = useCallback(async () => {
+    try {
+      await BleManager.start({ showAlert: false });
+      console.log('BLE Manager инициализирован');
+
+      if (Platform.OS === 'android') {
+        await requestBluetoothPermissions();
+      }
+
+      setStatus('BLE инициализирован, готов к работе');
+    } catch (error) {
+      console.error('Ошибка инициализации BLE:', error);
+      setStatus('Ошибка инициализации Bluetooth');
+    }
+  }, [requestBluetoothPermissions]);
 
   // Управление анимацией сканирования
   const startScanAnimation = useCallback(() => {
@@ -88,6 +137,15 @@ const OBDScannerScreen: React.FC = () => {
     scanAnimation.stopAnimation();
     scanAnimation.setValue(0);
   }, [scanAnimation]);
+
+  // Остановка сканирования
+  const stopScan = useCallback(() => {
+    BleManager.stopScan();
+    setIsScanning(false);
+    setStatus('Сканирование завершено');
+    stopScanAnimation();
+    DeviceEventEmitter.removeAllListeners('BleManagerDiscoverPeripheral');
+  }, [stopScanAnimation]);
 
   // Анимация пульса для статуса подключения
   useEffect(() => {
@@ -115,44 +173,69 @@ const OBDScannerScreen: React.FC = () => {
     }
   }, [isConnected, pulseAnimation]);
 
-  // Инициализация BLE
+  // Инициализация BLE при монтировании компонента
   useEffect(() => {
     initializeBLE();
+
     return () => {
-      BleManager.stopScan();
+      // Очистка при размонтировании
+      if (isScanning) {
+        BleManager.stopScan();
+      }
+      DeviceEventEmitter.removeAllListeners('BleManagerDiscoverPeripheral');
     };
-  }, []);
+  }, [initializeBLE, isScanning]);
 
-  const initializeBLE = async () => {
-    try {
-      await BleManager.start({ showAlert: false });
-      console.log('BLE Manager инициализирован');
+  // Отправка команды напрямую (для инициализации)
+  const sendCommandDirect = useCallback(
+    async (cmd: string): Promise<void> => {
+      if (!connectedDevice) return;
 
-      if (Platform.OS === 'android') {
-        await requestBluetoothPermissions();
-      }
-    } catch (error) {
-      console.error('Ошибка инициализации BLE:', error);
-      setStatus('Ошибка инициализации Bluetooth');
-    }
-  };
-
-  const requestBluetoothPermissions = async () => {
-    if (Platform.OS === 'android') {
       try {
-        const granted = await PermissionsAndroid.requestMultiple([
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-        ]);
-        console.log('Разрешения получены:', granted);
-      } catch (error) {
-        console.error('Ошибка получения разрешений:', error);
-      }
-    }
-  };
+        const commandWithCR = cmd.trim() + '\r';
+        const data = Array.from(commandWithCR, char => char.charCodeAt(0));
 
-  const startScan = async () => {
+        await BleManager.write(connectedDevice, SERVICE_UUID, RX_UUID, data);
+        console.log(`Команда отправлена: ${cmd}`);
+      } catch (error) {
+        console.error('Ошибка отправки команды:', error);
+        throw error;
+      }
+    },
+    [connectedDevice],
+  );
+
+  // Инициализация ELM327 адаптера
+  const initializeELM327 = useCallback(async () => {
+    if (!connectedDevice) return;
+
+    try {
+      setResponses(current => [...current, 'Инициализация ELM327...']);
+
+      // Последовательность команд инициализации ELM327
+      const initCommands = [
+        'ATZ', // Сброс
+        'ATE0', // Отключить эхо
+        'ATL0', // Отключить переводы строк
+        'ATS0', // Отключить пробелы
+        'ATH1', // Включить заголовки
+        'ATSP0', // Автоматический протокол
+      ];
+
+      for (const cmd of initCommands) {
+        await sendCommandDirect(cmd);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      setResponses(current => [...current, 'ELM327 инициализирован!']);
+      setStatus('ELM327 готов к работе');
+    } catch (error) {
+      console.error('Ошибка инициализации ELM327:', error);
+      setResponses(current => [...current, `Ошибка инициализации: ${error}`]);
+    }
+  }, [connectedDevice, sendCommandDirect]);
+
+  const startScan = useCallback(async () => {
     if (isScanning) {
       stopScan();
       return;
@@ -164,8 +247,18 @@ const OBDScannerScreen: React.FC = () => {
       setStatus('Сканирование...');
       startScanAnimation();
 
+      // Обработчик обнаружения устройств
       const handleDiscoverPeripheral = (peripheral: any) => {
-        if (peripheral.name) {
+        console.log('Обнаружено устройство:', peripheral);
+
+        // Фильтрация: показываем только именованные устройства или ELM327-подобные
+        if (
+          peripheral.name ||
+          (peripheral.advertising &&
+            peripheral.advertising.localName &&
+            peripheral.advertising.localName.toLowerCase().includes('elm')) ||
+          peripheral.name?.toLowerCase().includes('obd')
+        ) {
           setDevices(current => {
             const exists = current.find(device => device.id === peripheral.id);
             if (!exists) {
@@ -173,7 +266,10 @@ const OBDScannerScreen: React.FC = () => {
                 ...current,
                 {
                   id: peripheral.id,
-                  name: peripheral.name,
+                  name:
+                    peripheral.name ||
+                    peripheral.advertising?.localName ||
+                    'ELM327',
                   rssi: peripheral.rssi,
                 },
               ];
@@ -183,15 +279,17 @@ const OBDScannerScreen: React.FC = () => {
         }
       };
 
-      DeviceEventEmitter.addListener(
+      const subscription: EmitterSubscription = DeviceEventEmitter.addListener(
         'BleManagerDiscoverPeripheral',
         handleDiscoverPeripheral,
       );
 
       await BleManager.scan([], 30, false);
 
+      // Остановка сканирования через 30 секунд
       setTimeout(() => {
         stopScan();
+        subscription.remove();
       }, 30000);
     } catch (error) {
       console.error('Ошибка сканирования:', error);
@@ -199,35 +297,41 @@ const OBDScannerScreen: React.FC = () => {
       setIsScanning(false);
       stopScanAnimation();
     }
-  };
+  }, [isScanning, startScanAnimation, stopScan, stopScanAnimation]);
 
-  const stopScan = () => {
-    BleManager.stopScan();
-    setIsScanning(false);
-    setStatus('Сканирование завершено');
-    stopScanAnimation();
-    DeviceEventEmitter.removeAllListeners('BleManagerDiscoverPeripheral');
-  };
+  const connectToDevice = useCallback(
+    async (deviceId: string, deviceName?: string) => {
+      try {
+        setStatus(`Подключение к ${deviceName || deviceId}...`);
 
-  const connectToDevice = async (deviceId: string, deviceName?: string) => {
-    try {
-      setStatus(`Подключение к ${deviceName || deviceId}...`);
-      await BleManager.connect(deviceId);
-      await BleManager.retrieveServices(deviceId);
+        // Подключение к устройству
+        await BleManager.connect(deviceId);
+        console.log('Подключено к устройству:', deviceId);
 
-      setConnectedDevice(deviceId);
-      setIsConnected(true);
-      setStatus(`Подключено к ${deviceName || deviceId}`);
+        // Получение сервисов
+        await BleManager.retrieveServices(deviceId);
+        console.log('Сервисы получены');
 
-      Alert.alert('Успех', `Подключено к ${deviceName || deviceId}`);
-    } catch (error) {
-      console.error('Ошибка подключения:', error);
-      setStatus('Ошибка подключения');
-      Alert.alert('Ошибка', 'Не удалось подключиться к устройству');
-    }
-  };
+        setConnectedDevice(deviceId);
+        setIsConnected(true);
+        setStatus(`Подключено к ${deviceName || deviceId}`);
 
-  const disconnectDevice = async () => {
+        // Инициализация ELM327
+        setTimeout(() => {
+          initializeELM327();
+        }, 1000);
+
+        Alert.alert('Успех', `Подключено к ${deviceName || deviceId}`);
+      } catch (error) {
+        console.error('Ошибка подключения:', error);
+        setStatus('Ошибка подключения');
+        Alert.alert('Ошибка', 'Не удалось подключиться к устройству');
+      }
+    },
+    [initializeELM327],
+  );
+
+  const disconnectDevice = useCallback(async () => {
     if (connectedDevice) {
       try {
         await BleManager.disconnect(connectedDevice);
@@ -241,9 +345,9 @@ const OBDScannerScreen: React.FC = () => {
         Alert.alert('Ошибка', 'Не удалось отключиться');
       }
     }
-  };
+  }, [connectedDevice]);
 
-  const sendCommand = async () => {
+  const sendCommand = useCallback(async () => {
     if (!connectedDevice || !command.trim()) {
       Alert.alert('Ошибка', 'Введите команду для отправки');
       return;
@@ -262,20 +366,37 @@ const OBDScannerScreen: React.FC = () => {
       ]);
       setCommand('');
 
-      // Здесь должна быть логика чтения ответа
+      // Здесь должна быть логика чтения ответа от ELM327
+      // В реальном приложении нужно подписаться на уведомления
       setTimeout(() => {
-        setResponses(current => [...current, 'Ответ получен (пример)']);
+        setResponses(current => [...current, 'Ответ: OK (пример)']);
       }, 1000);
     } catch (error) {
       console.error('Ошибка отправки команды:', error);
       setResponses(current => [...current, `Ошибка: ${error}`]);
     }
-  };
+  }, [connectedDevice, command]);
 
-  const runQuickTest = () => {
+  // Быстрые команды для тестирования
+  const runQuickTest = useCallback(() => {
     setCommand('01 00');
     sendCommand();
-  };
+  }, [sendCommand]);
+
+  const getVIN = useCallback(() => {
+    setCommand('09 02');
+    sendCommand();
+  }, [sendCommand]);
+
+  const getEngineRPM = useCallback(() => {
+    setCommand('01 0C');
+    sendCommand();
+  }, [sendCommand]);
+
+  const getSpeed = useCallback(() => {
+    setCommand('01 0D');
+    sendCommand();
+  }, [sendCommand]);
 
   const renderDevice = ({ item }: { item: BluetoothDevice }) => (
     <View style={styles.deviceItem}>
@@ -324,6 +445,15 @@ const OBDScannerScreen: React.FC = () => {
               {isScanning ? '⏹️ Остановить' : '🔍 Сканировать'}
             </Text>
           </TouchableOpacity>
+
+          {isConnected && (
+            <TouchableOpacity
+              style={styles.disconnectButton}
+              onPress={disconnectDevice}
+            >
+              <Text style={styles.disconnectButtonText}>🔌 Отключить</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -339,58 +469,85 @@ const OBDScannerScreen: React.FC = () => {
         resetScrollToCoords={{ x: 0, y: 0 }}
       >
         {!isConnected ? (
-          // Список устройств
-          <View>
-            <Text style={styles.sectionTitle}>Найденные устройства:</Text>
-            <FlatList
-              data={devices}
-              renderItem={renderDevice}
-              keyExtractor={item => item.id}
-              style={styles.deviceList}
-              scrollEnabled={false} // Отключаем скролл у FlatList, так как используем KeyboardAwareScrollView
-            />
+          /* Список устройств */
+          <View style={styles.deviceList}>
+            <Text style={styles.sectionTitle}>Доступные устройства</Text>
+            {devices.length === 0 ? (
+              <Text style={styles.noDevicesText}>
+                {isScanning ? 'Поиск устройств...' : 'Нет найденных устройств'}
+              </Text>
+            ) : (
+              <FlatList
+                data={devices}
+                renderItem={renderDevice}
+                keyExtractor={item => item.id}
+                scrollEnabled={false}
+              />
+            )}
           </View>
         ) : (
-          // Интерфейс для подключенного устройства
-          <View>
-            <Text style={styles.sectionTitle}>Управление OBD2</Text>
+          /* Интерфейс управления */
+          <View style={styles.controlPanel}>
+            {/* Быстрые действия */}
+            <Text style={styles.sectionTitle}>Быстрые команды</Text>
+            <View style={styles.quickActions}>
+              <ActionButton
+                title="Тест"
+                icon="🔧"
+                onPress={runQuickTest}
+                variant="primary"
+              />
+              <ActionButton
+                title="VIN"
+                icon="🆔"
+                onPress={getVIN}
+                variant="secondary"
+              />
+              <ActionButton
+                title="Обороты"
+                icon="⚡"
+                onPress={getEngineRPM}
+                variant="secondary"
+              />
+              <ActionButton
+                title="Скорость"
+                icon="🏃"
+                onPress={getSpeed}
+                variant="secondary"
+              />
+            </View>
 
+            {/* Ввод команды */}
+            <Text style={styles.sectionTitle}>Ручная команда</Text>
             <View style={styles.commandSection}>
               <TextInput
                 style={styles.commandInput}
                 placeholder="Введите OBD команду (например: 01 00)"
+                placeholderTextColor="#666"
                 value={command}
                 onChangeText={setCommand}
                 autoCapitalize="characters"
-                placeholderTextColor="#999"
+                autoCorrect={false}
               />
               <TouchableOpacity style={styles.sendButton} onPress={sendCommand}>
-                <Text style={styles.sendButtonText}>Отправить</Text>
+                <Text style={styles.sendButtonText}>📤 Отправить</Text>
               </TouchableOpacity>
             </View>
 
-            <View style={styles.quickActions}>
-              <ActionButton
-                title="Быстрый тест"
-                icon="⚡"
-                onPress={runQuickTest}
-                variant="secondary"
-              />
-              <ActionButton
-                title="Отключить"
-                icon="🔌"
-                onPress={disconnectDevice}
-                variant="danger"
-              />
-            </View>
-
+            {/* Ответы */}
+            <Text style={styles.sectionTitle}>Ответы</Text>
             <View style={styles.responseContainer}>
-              <Text style={styles.responsesTitle}>Ответы:</Text>
-              {responses.map((response, index) => (
-                <Text key={index} style={styles.responseText}>
-                  {response}
+              {responses.length === 0 ? (
+                <Text style={styles.responseText}>
+                  Ответы будут отображены здесь...
                 </Text>
-              ))}
+              ) : (
+                responses.map((response, index) => (
+                  <Text key={index} style={styles.responseText}>
+                    {response}
+                  </Text>
+                ))
+              )}
             </View>
           </View>
         )}
@@ -402,83 +559,101 @@ const OBDScannerScreen: React.FC = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
   },
   header: {
-    padding: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#333',
   },
   statusContainer: {
     alignItems: 'center',
-    marginBottom: 15,
+    marginBottom: 12,
   },
   status: {
     fontSize: 16,
     color: '#ffffff',
-    fontWeight: '600',
+    textAlign: 'center',
   },
   connectedStatus: {
     color: '#00ff88',
+    fontWeight: 'bold',
   },
   controls: {
-    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-around',
   },
   scanButton: {
-    backgroundColor: '#333',
-    paddingHorizontal: 30,
+    backgroundColor: '#2196F3',
     paddingVertical: 12,
-    borderRadius: 25,
-    borderWidth: 2,
-    borderColor: '#555',
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    flex: 1,
+    marginRight: 8,
   },
   scanButtonActive: {
-    backgroundColor: '#ff6b6b',
-    borderColor: '#ff6b6b',
+    backgroundColor: '#FF5722',
   },
   scanButtonText: {
     color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  disconnectButton: {
+    backgroundColor: '#F44336',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    flex: 1,
+    marginLeft: 8,
+  },
+  disconnectButtonText: {
+    color: '#ffffff',
+    fontWeight: 'bold',
+    textAlign: 'center',
   },
   content: {
     flex: 1,
   },
   contentContainer: {
-    flexGrow: 1,
-    padding: 20,
-  },
-  sectionTitle: {
-    color: '#00ff88',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 15,
+    padding: 16,
   },
   deviceList: {
-    flexGrow: 0,
+    flex: 1,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#00ff88',
+    marginBottom: 12,
+  },
+  noDevicesText: {
+    color: '#666',
+    textAlign: 'center',
+    marginTop: 20,
+    fontStyle: 'italic',
   },
   deviceItem: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     backgroundColor: '#1a1a1a',
-    padding: 15,
-    borderRadius: 10,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#333',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 8,
   },
   deviceInfo: {
     flex: 1,
   },
   deviceName: {
-    color: '#ffffff',
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: 'bold',
+    color: '#ffffff',
   },
   deviceId: {
     fontSize: 12,
-    color: '#666',
+    color: '#999',
     marginTop: 2,
   },
   deviceRssi: {
@@ -495,6 +670,9 @@ const styles = StyleSheet.create({
   connectButtonText: {
     color: 'white',
     fontWeight: '600',
+  },
+  controlPanel: {
+    flex: 1,
   },
   commandSection: {
     flexDirection: 'row',
@@ -563,18 +741,13 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 12,
     minHeight: 200,
-  },
-  responsesTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 8,
-    color: '#00ff88',
+    maxHeight: 300,
   },
   responseText: {
     fontSize: 12,
     color: '#ffffff',
     marginBottom: 4,
-    fontFamily: 'monospace',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
 });
 

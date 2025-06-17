@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Text } from 'react-native';
+import { Text, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 // Импортируем наши экраны
@@ -10,6 +10,15 @@ import CarKeeperScreen from './src/screens/CarKeeperScreen';
 
 const Tab = createBottomTabNavigator();
 
+// Выносим компоненты иконок за пределы рендера
+const ScannerIcon = ({ color }: { color: string }) => (
+  <Text style={[styles.tabIcon, { color }]}>🔧</Text>
+);
+
+const CarKeeperIcon = ({ color }: { color: string }) => (
+  <Text style={[styles.tabIcon, { color }]}>🚗</Text>
+);
+
 const App = () => {
   return (
     <SafeAreaProvider>
@@ -17,11 +26,7 @@ const App = () => {
         <Tab.Navigator
           screenOptions={{
             headerShown: false,
-            tabBarStyle: {
-              backgroundColor: '#1a1a1a',
-              borderTopColor: '#333',
-              borderTopWidth: 1,
-            },
+            tabBarStyle: styles.tabBar,
             tabBarActiveTintColor: '#00ff88',
             tabBarInactiveTintColor: '#888',
           }}
@@ -31,9 +36,7 @@ const App = () => {
             component={OBDScannerScreen}
             options={{
               tabBarLabel: 'OBD Сканер',
-              tabBarIcon: ({ color }) => (
-                <Text style={{ fontSize: 20, color }}>🔧</Text>
-              ),
+              tabBarIcon: ScannerIcon,
             }}
           />
           <Tab.Screen
@@ -41,9 +44,7 @@ const App = () => {
             component={CarKeeperScreen}
             options={{
               tabBarLabel: 'Car Keeper',
-              tabBarIcon: ({ color }) => (
-                <Text style={{ fontSize: 20, color }}>🚗</Text>
-              ),
+              tabBarIcon: CarKeeperIcon,
             }}
           />
         </Tab.Navigator>
@@ -51,5 +52,16 @@ const App = () => {
     </SafeAreaProvider>
   );
 };
+
+const styles = StyleSheet.create({
+  tabBar: {
+    backgroundColor: '#1a1a1a',
+    borderTopColor: '#333',
+    borderTopWidth: 1,
+  },
+  tabIcon: {
+    fontSize: 20,
+  },
+});
 
 export default App;
