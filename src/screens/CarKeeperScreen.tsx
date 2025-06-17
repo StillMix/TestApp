@@ -12,6 +12,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface MaintenanceItem {
   id: string;
@@ -206,6 +207,7 @@ const AddMaintenanceModal: React.FC<AddMaintenanceModalProps> = ({
 };
 
 const CarKeeperScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   const [maintenanceItems, setMaintenanceItems] = useState<MaintenanceItem[]>(
     [],
   );
@@ -481,6 +483,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#0a0a0a',
   },
   header: {
+    paddingTop: Platform.OS === 'ios' ? 60 : 20,
     padding: 20,
     borderBottomWidth: 1,
     borderBottomColor: '#333',
