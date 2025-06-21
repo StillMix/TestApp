@@ -12,6 +12,7 @@ import {
   Platform,
   DeviceEventEmitter,
   EmitterSubscription,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
@@ -165,37 +166,165 @@ const OBDScannerScreen: React.FC = () => {
     try {
       console.log('=== ИНИЦИАЛИЗАЦИЯ BLE ===');
 
-      // Запрос разрешений
-      const hasPermissions = await requestPermissions();
-      if (!hasPermissions) {
-        setStatus('Нет разрешений');
-        return;
+      // Запрос разрешений для Android
+      if (Platform.OS === 'android') {
+        const hasPermissions = await requestPermissions();
+        if (!hasPermissions) {
+          setStatus('Нет разрешений Android');
+          return;
+        }
       }
 
       setStatus('Инициализация BLE...');
+
+      // Инициализация BLE Manager
       await BleManager.start({ showAlert: false });
+      console.log('BLE Manager запущен');
 
-      // Проверяем состояние Bluetooth
-      const state = await BleManager.checkState();
-      console.log('BLE состояние:', state);
+      // Задержка для полной инициализации на iOS
+      await new Promise(resolve => setTimeout(resolve, 1000));
 
-      if (state !== 'on') {
-        Alert.alert('Ошибка', 'Включите Bluetooth в настройках');
-        setStatus('Bluetooth выключен');
-        return;
+      // Для iOS: пробуем разные способы проверки состояния
+      if (Platform.OS === 'ios') {
+        console.log('iOS: Проверка состояния Bluetooth...');
+
+        try {
+          // Первая попытка - стандартная проверка
+          const state = await BleManager.checkState();
+          console.log('BLE состояние (checkState):', state);
+
+          // Вторая попытка - пробуем запустить сканирование для проверки
+          try {
+            await BleManager.scan([], 1, false); // Очень короткое сканирование
+            await new Promise(resolve => setTimeout(resolve, 100));
+            await BleManager.stopScan();
+
+            console.log(
+              'iOS: Bluetooth работает - сканирование прошло успешно',
+            );
+            setStatus('BLE готов к сканированию');
+            return;
+          } catch (scanError) {
+            console.log('iOS: Ошибка тестового сканирования:', scanError);
+
+            // Проверяем код ошибки
+            if (
+              scanError.message?.includes('unauthorized') ||
+              scanError.message?.includes('permission')
+            ) {
+              Alert.alert(
+                'Разрешения Bluetooth',
+                'Необходимо разрешить доступ к Bluetooth в настройках iPhone:\n\n' +
+                  '1. Настройки → Конфиденциальность\n' +
+                  '2. Bluetooth → TestApp\n' +
+                  '3. Включить все разрешения',
+                [
+                  { text: 'Отмена', style: 'cancel' },
+                  {
+                    text: 'Открыть настройки',
+                    onPress: () => {
+                      // На iOS можно открыть настройки приложения
+                      if (Platform.OS === 'ios') {
+                        Linking.openURL('app-settings:');
+                      }
+                    },
+                  },
+                ],
+              );
+              setStatus('Нет разрешений Bluetooth');
+              return;
+            }
+
+            if (
+              scanError.message?.includes('powered off') ||
+              scanError.message?.includes('unsupported')
+            ) {
+              Alert.alert(
+                'Bluetooth',
+                'Включите Bluetooth в настройках iPhone',
+              );
+              setStatus('Bluetooth выключен');
+              return;
+            }
+
+            // Неизвестная ошибка - пробуем продолжить
+            console.log('iOS: Неизвестная ошибка, пробуем продолжить');
+            setStatus('BLE частично готов (проверьте разрешения)');
+          }
+        } catch (stateError) {
+          console.log('iOS: Ошибка проверки состояния:', stateError);
+
+          // Пробуем продолжить работу
+          setStatus('BLE инициализирован (состояние неизвестно)');
+        }
+      } else {
+        // Android - стандартная проверка
+        const state = await BleManager.checkState();
+        console.log('Android BLE состояние:', state);
+
+        if (state !== 'on') {
+          Alert.alert('Ошибка', 'Включите Bluetooth в настройках');
+          setStatus('Bluetooth выключен');
+          return;
+        }
+
+        setStatus('BLE готов к сканированию');
       }
 
       console.log('BLE инициализирован успешно');
-      setStatus('BLE готов к сканированию');
     } catch (error) {
       console.error('Ошибка инициализации BLE:', error);
       setStatus(`Ошибка BLE: ${error.message}`);
-      Alert.alert(
-        'Ошибка',
-        `Не удалось инициализировать BLE: ${error.message}`,
-      );
+
+      // Для iOS показываем более детальную информацию
+      if (Platform.OS === 'ios') {
+        Alert.alert(
+          'Ошибка Bluetooth',
+          `Проблема с инициализацией Bluetooth:\n\n${error.message}\n\n` +
+            'Убедитесь что:\n' +
+            '1. Bluetooth включен\n' +
+            '2. Разрешения даны в настройках\n' +
+            '3. Приложение перезапущено после дачи разрешений',
+          [
+            { text: 'OK' },
+            {
+              text: 'Настройки',
+              onPress: () => Linking.openURL('app-settings:'),
+            },
+          ],
+        );
+      } else {
+        Alert.alert(
+          'Ошибка',
+          `Не удалось инициализировать BLE: ${error.message}`,
+        );
+      }
     }
   }, [requestPermissions]);
+  const checkiOSPermissions = useCallback(async () => {
+    if (Platform.OS !== 'ios') return true;
+
+    try {
+      console.log('Проверка разрешений iOS...');
+
+      // Пытаемся запустить очень короткое сканирование
+      await BleManager.scan([], 0.1, false);
+      await BleManager.stopScan();
+
+      console.log('iOS разрешения OK');
+      return true;
+    } catch (error) {
+      console.log('iOS разрешения НЕ ОК:', error.message);
+
+      if (error.message?.includes('unauthorized')) {
+        setStatus('Нет разрешений iOS');
+        return false;
+      }
+
+      // Другие ошибки могут быть не связаны с разрешениями
+      return true;
+    }
+  }, []);
 
   // Остановка сканирования
   const stopScan = useCallback(async () => {
@@ -246,18 +375,29 @@ const OBDScannerScreen: React.FC = () => {
     try {
       console.log('=== НАЧАЛО СКАНИРОВАНИЯ ===');
 
+      // Дополнительная проверка для iOS
+      if (Platform.OS === 'ios') {
+        const hasPermissions = await checkiOSPermissions();
+        if (!hasPermissions) {
+          Alert.alert(
+            'Нет разрешений',
+            'Дайте разрешения Bluetooth в настройках и перезапустите приложение',
+            [
+              { text: 'OK' },
+              {
+                text: 'Настройки',
+                onPress: () => Linking.openURL('app-settings:'),
+              },
+            ],
+          );
+          return;
+        }
+      }
+
       setDevices([]);
       setIsScanning(true);
       setStatus('Сканирование устройств...');
       startScanAnimation();
-
-      // Проверка состояния Bluetooth
-      const state = await BleManager.checkState();
-      console.log('Bluetooth состояние перед сканированием:', state);
-
-      if (state !== 'on') {
-        throw new Error('Bluetooth выключен');
-      }
 
       // Обработчик обнаружения устройств
       const handleDiscoverPeripheral = (peripheral: any) => {
@@ -277,7 +417,7 @@ const OBDScannerScreen: React.FC = () => {
         const isELM327Candidate = isPotentialELM327(peripheral);
         console.log('Потенциальный ELM327:', isELM327Candidate);
 
-        // Добавляем ВСЕ устройства для отладки, но помечаем ELM327 кандидатов
+        // Добавляем ВСЕ устройства для отладки
         setDevices(current => {
           const exists = current.find(device => device.id === peripheral.id);
           if (!exists) {
@@ -306,29 +446,50 @@ const OBDScannerScreen: React.FC = () => {
         handleDiscoverPeripheral,
       );
 
-      // Запуск сканирования (60 секунд, разрешить дубликаты)
+      // Запуск сканирования
       console.log('Запуск BLE сканирования...');
-      await BleManager.scan([], 60, true);
+      await BleManager.scan([], 30, true); // 30 секунд, разрешить дубликаты
       console.log('Сканирование запущено');
 
-      // Автоматическая остановка через 60 секунд
+      // Автоматическая остановка через 30 секунд
       setTimeout(async () => {
         console.log('Автоматическая остановка сканирования');
         await stopScan();
         subscription.remove();
-      }, 60000);
+      }, 30000);
     } catch (error) {
       console.error('Ошибка при запуске сканирования:', error);
       setStatus(`Ошибка сканирования: ${error.message}`);
       setIsScanning(false);
       stopScanAnimation();
-      Alert.alert(
-        'Ошибка',
-        `Не удалось запустить сканирование: ${error.message}`,
-      );
-    }
-  }, [isScanning, startScanAnimation, stopScan, isPotentialELM327]);
 
+      // Специальная обработка для iOS
+      if (Platform.OS === 'ios' && error.message?.includes('unauthorized')) {
+        Alert.alert(
+          'Нет разрешений Bluetooth',
+          'Необходимо дать разрешения в настройках iPhone и перезапустить приложение',
+          [
+            { text: 'OK' },
+            {
+              text: 'Настройки',
+              onPress: () => Linking.openURL('app-settings:'),
+            },
+          ],
+        );
+      } else {
+        Alert.alert(
+          'Ошибка',
+          `Не удалось запустить сканирование: ${error.message}`,
+        );
+      }
+    }
+  }, [
+    isScanning,
+    startScanAnimation,
+    stopScan,
+    isPotentialELM327,
+    checkiOSPermissions,
+  ]);
   // Поиск подходящих UUID сервисов
   const findWorkingUUIDs = async (
     deviceId: string,
