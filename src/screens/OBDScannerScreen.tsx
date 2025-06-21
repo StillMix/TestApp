@@ -64,7 +64,7 @@ const ActionButton: React.FC<ActionButtonProps> = ({
 const OBDScannerScreen: React.FC = () => {
   const [devices, setDevices] = useState<BluetoothDevice[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<string | null>(null);
-  const [status, setStatus] = useState<string>('Готов к сканированию');
+  const [status, setStatus] = useState<string>('Готов к инициализации');
   const [command, setCommand] = useState<string>('');
   const [responses, setResponses] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -75,36 +75,39 @@ const OBDScannerScreen: React.FC = () => {
   // Возможные UUID для ELM327 устройств
   const POSSIBLE_SERVICE_UUIDS = [
     '6e400001-b5a3-f393-e0a9-e50e24dcca9e', // Nordic UART Service
-    'fff0', // Некоторые ELM327
-    '0000fff0-0000-1000-8000-00805f9b34fb', // ELM327 BLE
-    '00001101-0000-1000-8000-00805f9b34fb', // Serial Port Profile
+    'fff0', // Общий сервис
+    '00001101-0000-1000-8000-00805f9b34fb', // SPP
   ];
 
-  const POSSIBLE_RX_UUIDS = [
-    '6e400002-b5a3-f393-e0a9-e50e24dcca9e', // Nordic UART RX
-    'fff1', // ELM327 RX
-    '0000fff1-0000-1000-8000-00805f9b34fb',
+  const POSSIBLE_WRITE_CHARACTERISTICS = [
+    '6e400002-b5a3-f393-e0a9-e50e24dcca9e', // Nordic UART TX
+    'fff1',
+    'fff2',
+    'fff3',
   ];
 
-  const POSSIBLE_TX_UUIDS = [
-    '6e400003-b5a3-f393-e0a9-e50e24dcca9e', // Nordic UART TX
-    'fff2', // ELM327 TX
-    '0000fff2-0000-1000-8000-00805f9b34fb',
+  const POSSIBLE_NOTIFY_CHARACTERISTICS = [
+    '6e400003-b5a3-f393-e0a9-e50e24dcca9e', // Nordic UART RX
+    'fff4',
+    'fff1',
+    'fff2',
   ];
-
-  // Текущие рабочие UUID (будут определены при подключении)
-  const [currentServiceUUID, setCurrentServiceUUID] = useState<string>('');
-  const [currentRxUUID, setCurrentRxUUID] = useState<string>('');
-  const [currentTxUUID, setCurrentTxUUID] = useState<string>('');
 
   // Анимации
   const startScanAnimation = useCallback(() => {
     Animated.loop(
-      Animated.timing(scanAnimation, {
-        toValue: 1,
-        duration: 2000,
-        useNativeDriver: true,
-      }),
+      Animated.sequence([
+        Animated.timing(scanAnimation, {
+          toValue: 1,
+          duration: 1000,
+          useNativeDriver: true,
+        }),
+        Animated.timing(scanAnimation, {
+          toValue: 0,
+          duration: 1000,
+          useNativeDriver: true,
+        }),
+      ]),
     ).start();
   }, [scanAnimation]);
 
@@ -117,7 +120,7 @@ const OBDScannerScreen: React.FC = () => {
     Animated.loop(
       Animated.sequence([
         Animated.timing(pulseAnimation, {
-          toValue: 1.2,
+          toValue: 1.1,
           duration: 1000,
           useNativeDriver: true,
         }),
@@ -130,200 +133,147 @@ const OBDScannerScreen: React.FC = () => {
     ).start();
   }, [pulseAnimation]);
 
+  const stopPulseAnimation = useCallback(() => {
+    pulseAnimation.stopAnimation();
+    pulseAnimation.setValue(1);
+  }, [pulseAnimation]);
+
   // Запрос разрешений для Android
-  const requestPermissions = useCallback(async () => {
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.requestMultiple([
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-          PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION,
-        ]);
+  const requestAndroidPermissions = useCallback(async () => {
+    if (Platform.OS !== 'android') return true;
 
-        const allGranted = Object.values(granted).every(
-          permission => permission === PermissionsAndroid.RESULTS.GRANTED,
+    try {
+      console.log('Запрос разрешений Android...');
+      const granted = await PermissionsAndroid.requestMultiple([
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+      ]);
+
+      console.log('Результат разрешений Android:', granted);
+
+      const allGranted = Object.values(granted).every(
+        permission => permission === PermissionsAndroid.RESULTS.GRANTED,
+      );
+
+      if (!allGranted) {
+        Alert.alert(
+          'Разрешения не получены',
+          'Для работы с Bluetooth необходимы все разрешения',
         );
-
-        if (!allGranted) {
-          Alert.alert(
-            'Разрешения',
-            'Для работы с Bluetooth необходимы все разрешения',
-          );
-          return false;
-        }
-        return true;
-      } catch (error) {
-        console.error('Ошибка запроса разрешений:', error);
         return false;
       }
+      return true;
+    } catch (error) {
+      console.error('Ошибка запроса разрешений Android:', error);
+      return false;
     }
-    return true;
   }, []);
 
   // Инициализация BLE
   const initializeBLE = useCallback(async () => {
     try {
       console.log('=== ИНИЦИАЛИЗАЦИЯ BLE ===');
+      setStatus('Инициализация BLE...');
 
-      // Запрос разрешений для Android
+      // Для Android - запрашиваем разрешения
       if (Platform.OS === 'android') {
-        const hasPermissions = await requestPermissions();
+        const hasPermissions = await requestAndroidPermissions();
         if (!hasPermissions) {
           setStatus('Нет разрешений Android');
           return;
         }
       }
 
-      setStatus('Инициализация BLE...');
-
-      // Инициализация BLE Manager
+      console.log('Запуск BLE Manager...');
       await BleManager.start({ showAlert: false });
       console.log('BLE Manager запущен');
 
-      // Задержка для полной инициализации на iOS
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Задержка для полной инициализации
+      await new Promise(resolve => setTimeout(resolve, 2000));
 
-      // Для iOS: пробуем разные способы проверки состояния
-      if (Platform.OS === 'ios') {
-        console.log('iOS: Проверка состояния Bluetooth...');
+      // Проверяем состояние Bluetooth
+      const state = await BleManager.checkState();
+      console.log('Состояние BLE:', state);
 
-        try {
-          // Первая попытка - стандартная проверка
-          const state = await BleManager.checkState();
-          console.log('BLE состояние (checkState):', state);
+      if (state === 'on') {
+        setStatus('BLE готов к сканированию');
+        console.log('✅ BLE успешно инициализирован');
 
-          // Вторая попытка - пробуем запустить сканирование для проверки
-          try {
-            await BleManager.scan([], 1, false); // Очень короткое сканирование
-            await new Promise(resolve => setTimeout(resolve, 100));
-            await BleManager.stopScan();
-
-            console.log(
-              'iOS: Bluetooth работает - сканирование прошло успешно',
-            );
-            setStatus('BLE готов к сканированию');
-            return;
-          } catch (scanError) {
-            console.log('iOS: Ошибка тестового сканирования:', scanError);
-
-            // Проверяем код ошибки
-            if (
-              scanError.message?.includes('unauthorized') ||
-              scanError.message?.includes('permission')
-            ) {
-              Alert.alert(
-                'Разрешения Bluetooth',
-                'Необходимо разрешить доступ к Bluetooth в настройках iPhone:\n\n' +
-                  '1. Настройки → Конфиденциальность\n' +
-                  '2. Bluetooth → TestApp\n' +
-                  '3. Включить все разрешения',
-                [
-                  { text: 'Отмена', style: 'cancel' },
-                  {
-                    text: 'Открыть настройки',
-                    onPress: () => {
-                      // На iOS можно открыть настройки приложения
-                      if (Platform.OS === 'ios') {
-                        Linking.openURL('app-settings:');
-                      }
-                    },
-                  },
-                ],
-              );
-              setStatus('Нет разрешений Bluetooth');
-              return;
-            }
-
-            if (
-              scanError.message?.includes('powered off') ||
-              scanError.message?.includes('unsupported')
-            ) {
-              Alert.alert(
-                'Bluetooth',
-                'Включите Bluetooth в настройках iPhone',
-              );
-              setStatus('Bluetooth выключен');
-              return;
-            }
-
-            // Неизвестная ошибка - пробуем продолжить
-            console.log('iOS: Неизвестная ошибка, пробуем продолжить');
-            setStatus('BLE частично готов (проверьте разрешения)');
-          }
-        } catch (stateError) {
-          console.log('iOS: Ошибка проверки состояния:', stateError);
-
-          // Пробуем продолжить работу
-          setStatus('BLE инициализирован (состояние неизвестно)');
+        if (Platform.OS === 'ios') {
+          setStatus('BLE готов. При сканировании iOS запросит разрешения');
         }
       } else {
-        // Android - стандартная проверка
-        const state = await BleManager.checkState();
-        console.log('Android BLE состояние:', state);
-
-        if (state !== 'on') {
-          Alert.alert('Ошибка', 'Включите Bluetooth в настройках');
-          setStatus('Bluetooth выключен');
-          return;
-        }
-
-        setStatus('BLE готов к сканированию');
+        setStatus(`Bluetooth выключен: ${state}`);
+        Alert.alert(
+          'Bluetooth выключен',
+          'Включите Bluetooth в настройках устройства',
+          [
+            { text: 'OK' },
+            { text: 'Настройки', onPress: () => Linking.openSettings() },
+          ],
+        );
       }
-
-      console.log('BLE инициализирован успешно');
     } catch (error) {
       console.error('Ошибка инициализации BLE:', error);
       setStatus(`Ошибка BLE: ${error.message}`);
 
-      // Для iOS показываем более детальную информацию
-      if (Platform.OS === 'ios') {
+      if (Platform.OS === 'ios' && error.message?.includes('unauthorized')) {
         Alert.alert(
-          'Ошибка Bluetooth',
-          `Проблема с инициализацией Bluetooth:\n\n${error.message}\n\n` +
-            'Убедитесь что:\n' +
-            '1. Bluetooth включен\n' +
-            '2. Разрешения даны в настройках\n' +
-            '3. Приложение перезапущено после дачи разрешений',
-          [
-            { text: 'OK' },
-            {
-              text: 'Настройки',
-              onPress: () => Linking.openURL('app-settings:'),
-            },
-          ],
-        );
-      } else {
-        Alert.alert(
-          'Ошибка',
-          `Не удалось инициализировать BLE: ${error.message}`,
+          'Нужны разрешения',
+          'При первом сканировании iOS попросит разрешения на Bluetooth и местоположение. Обязательно разрешите их.',
+          [{ text: 'Понятно' }],
         );
       }
     }
-  }, [requestPermissions]);
-  const checkiOSPermissions = useCallback(async () => {
-    if (Platform.OS !== 'ios') return true;
+  }, [requestAndroidPermissions]);
 
-    try {
-      console.log('Проверка разрешений iOS...');
+  // Проверка, является ли устройство потенциально ELM327
+  const isPotentialELM327 = useCallback((peripheral: any): boolean => {
+    const name = (peripheral.name || '').toLowerCase();
+    const localName = (peripheral.advertising?.localName || '').toLowerCase();
 
-      // Пытаемся запустить очень короткое сканирование
-      await BleManager.scan([], 0.1, false);
-      await BleManager.stopScan();
+    const elm327Keywords = [
+      'elm327',
+      'elm',
+      'obd',
+      'obdii',
+      'obd2',
+      'v-link',
+      'vlink',
+      'vlinker',
+      'vgate',
+      'scan',
+      'scanner',
+      'auto',
+      'car',
+      'vehicle',
+      'diag',
+      'diagnostic',
+      'ecu',
+      'can',
+      'canbus',
+      'bluetooth',
+      'ble',
+      'torque',
+      'forscan',
+      'konnwei',
+      'autel',
+      'launch',
+      'nexas',
+      'innova',
+      'ancel',
+      'foxwell',
+      'thinkcar',
+      'veepeak',
+      'panlong',
+      'bafx',
+      'lemur',
+    ];
 
-      console.log('iOS разрешения OK');
-      return true;
-    } catch (error) {
-      console.log('iOS разрешения НЕ ОК:', error.message);
+    const fullText = `${name} ${localName}`.toLowerCase();
 
-      if (error.message?.includes('unauthorized')) {
-        setStatus('Нет разрешений iOS');
-        return false;
-      }
-
-      // Другие ошибки могут быть не связаны с разрешениями
-      return true;
-    }
+    return elm327Keywords.some(keyword => fullText.includes(keyword));
   }, []);
 
   // Остановка сканирования
@@ -339,32 +289,6 @@ const OBDScannerScreen: React.FC = () => {
     }
   }, [devices.length, stopScanAnimation]);
 
-  // Проверка, является ли устройство потенциально ELM327
-  const isPotentialELM327 = (peripheral: any): boolean => {
-    const name = (peripheral.name || '').toLowerCase();
-    const localName = (peripheral.advertising?.localName || '').toLowerCase();
-
-    const elm327Keywords = [
-      'elm',
-      'obd',
-      'obdii',
-      'v-link',
-      'vlink',
-      'vgate',
-      'scan',
-      'auto',
-      'car',
-      'diag',
-      'ecu',
-      'can',
-      'bluetooth',
-    ];
-
-    return elm327Keywords.some(
-      keyword => name.includes(keyword) || localName.includes(keyword),
-    );
-  };
-
   // Начало сканирования
   const startScan = useCallback(async () => {
     if (isScanning) {
@@ -375,29 +299,54 @@ const OBDScannerScreen: React.FC = () => {
     try {
       console.log('=== НАЧАЛО СКАНИРОВАНИЯ ===');
 
-      // Дополнительная проверка для iOS
-      if (Platform.OS === 'ios') {
-        const hasPermissions = await checkiOSPermissions();
-        if (!hasPermissions) {
-          Alert.alert(
-            'Нет разрешений',
-            'Дайте разрешения Bluetooth в настройках и перезапустите приложение',
-            [
-              { text: 'OK' },
-              {
-                text: 'Настройки',
-                onPress: () => Linking.openURL('app-settings:'),
-              },
-            ],
-          );
-          return;
-        }
+      // Проверяем состояние BLE
+      const state = await BleManager.checkState();
+      console.log('Состояние BLE:', state);
+
+      if (state !== 'on') {
+        setStatus('Bluetooth выключен');
+        Alert.alert(
+          'Bluetooth выключен',
+          'Включите Bluetooth и попробуйте снова',
+        );
+        return;
       }
 
       setDevices([]);
       setIsScanning(true);
       setStatus('Сканирование устройств...');
       startScanAnimation();
+
+      // Получаем сопряженные устройства (для iOS важно!)
+      console.log('Поиск сопряженных устройств...');
+      try {
+        const bondedDevices = await BleManager.getBondedPeripherals();
+        console.log('Сопряженные устройства:', bondedDevices);
+
+        bondedDevices.forEach(device => {
+          console.log(`Сопряженное: ${device.name} (${device.id})`);
+          setDevices(current => {
+            const exists = current.find(d => d.id === device.id);
+            if (!exists) {
+              return [
+                ...current,
+                {
+                  id: device.id,
+                  name: `🔗 ${device.name || 'Неизвестное'} (сопряжен)`,
+                  rssi: -50,
+                  rawData: device,
+                },
+              ];
+            }
+            return current;
+          });
+        });
+      } catch (error) {
+        console.log(
+          'Не удалось получить сопряженные устройства:',
+          error.message,
+        );
+      }
 
       // Обработчик обнаружения устройств
       const handleDiscoverPeripheral = (peripheral: any) => {
@@ -406,26 +355,24 @@ const OBDScannerScreen: React.FC = () => {
         console.log('Name:', peripheral.name);
         console.log('LocalName:', peripheral.advertising?.localName);
         console.log('RSSI:', peripheral.rssi);
-        console.log('IsConnectable:', peripheral.advertising?.isConnectable);
+        console.log('Connectable:', peripheral.advertising?.isConnectable);
         console.log('ServiceUUIDs:', peripheral.advertising?.serviceUUIDs);
         console.log(
           'ManufacturerData:',
           peripheral.advertising?.manufacturerData,
         );
-        console.log('Raw данные:', JSON.stringify(peripheral, null, 2));
+
+        const deviceName =
+          peripheral.name ||
+          peripheral.advertising?.localName ||
+          `Устройство ${peripheral.id.slice(-4)}`;
 
         const isELM327Candidate = isPotentialELM327(peripheral);
         console.log('Потенциальный ELM327:', isELM327Candidate);
 
-        // Добавляем ВСЕ устройства для отладки
         setDevices(current => {
           const exists = current.find(device => device.id === peripheral.id);
           if (!exists) {
-            const deviceName =
-              peripheral.name ||
-              peripheral.advertising?.localName ||
-              `Устройство ${peripheral.id.slice(-4)}`;
-
             return [
               ...current,
               {
@@ -448,15 +395,15 @@ const OBDScannerScreen: React.FC = () => {
 
       // Запуск сканирования
       console.log('Запуск BLE сканирования...');
-      await BleManager.scan([], 30, true); // 30 секунд, разрешить дубликаты
+      await BleManager.scan([], 20, true); // 20 секунд, разрешить дубликаты
       console.log('Сканирование запущено');
 
-      // Автоматическая остановка через 30 секунд
+      // Автоматическая остановка через 20 секунд
       setTimeout(async () => {
         console.log('Автоматическая остановка сканирования');
         await stopScan();
         subscription.remove();
-      }, 30000);
+      }, 20000);
     } catch (error) {
       console.error('Ошибка при запуске сканирования:', error);
       setStatus(`Ошибка сканирования: ${error.message}`);
@@ -464,126 +411,65 @@ const OBDScannerScreen: React.FC = () => {
       stopScanAnimation();
 
       // Специальная обработка для iOS
-      if (Platform.OS === 'ios' && error.message?.includes('unauthorized')) {
-        Alert.alert(
-          'Нет разрешений Bluetooth',
-          'Необходимо дать разрешения в настройках iPhone и перезапустить приложение',
-          [
-            { text: 'OK' },
-            {
-              text: 'Настройки',
-              onPress: () => Linking.openURL('app-settings:'),
-            },
-          ],
-        );
-      } else {
-        Alert.alert(
-          'Ошибка',
-          `Не удалось запустить сканирование: ${error.message}`,
-        );
+      if (Platform.OS === 'ios') {
+        if (
+          error.message?.includes('unauthorized') ||
+          error.message?.includes('permission')
+        ) {
+          Alert.alert(
+            'Нужны разрешения',
+            'Разрешите доступ к Bluetooth и местоположению в настройках iPhone:\n\n' +
+              'Настройки → Конфиденциальность → Bluetooth → TestApp\n' +
+              'Настройки → Конфиденциальность → Службы геолокации → TestApp',
+            [
+              { text: 'OK' },
+              {
+                text: 'Открыть настройки',
+                onPress: () => Linking.openSettings(),
+              },
+            ],
+          );
+        }
       }
     }
   }, [
     isScanning,
-    startScanAnimation,
     stopScan,
+    startScanAnimation,
+    stopScanAnimation,
     isPotentialELM327,
-    checkiOSPermissions,
   ]);
-  // Поиск подходящих UUID сервисов
-  const findWorkingUUIDs = async (
-    deviceId: string,
-  ): Promise<{ service: string; rx: string; tx: string } | null> => {
-    try {
-      console.log('Получение сервисов устройства...');
-      const peripheralInfo = await BleManager.retrieveServices(deviceId);
-      console.log(
-        'Информация об устройстве:',
-        JSON.stringify(peripheralInfo, null, 2),
-      );
-
-      // Проверяем каждый возможный сервис
-      for (const serviceUUID of POSSIBLE_SERVICE_UUIDS) {
-        const service = peripheralInfo.services?.find(
-          s => s.uuid.toLowerCase() === serviceUUID.toLowerCase(),
-        );
-
-        if (service) {
-          console.log(`Найден сервис: ${serviceUUID}`);
-
-          // Ищем RX и TX характеристики
-          for (const rxUUID of POSSIBLE_RX_UUIDS) {
-            for (const txUUID of POSSIBLE_TX_UUIDS) {
-              const rxChar = service.characteristics?.find(
-                c => c.characteristic.toLowerCase() === rxUUID.toLowerCase(),
-              );
-              const txChar = service.characteristics?.find(
-                c => c.characteristic.toLowerCase() === txUUID.toLowerCase(),
-              );
-
-              if (rxChar && txChar) {
-                console.log(
-                  `Найдены рабочие UUID: service=${serviceUUID}, rx=${rxUUID}, tx=${txUUID}`,
-                );
-                return { service: serviceUUID, rx: rxUUID, tx: txUUID };
-              }
-            }
-          }
-        }
-      }
-
-      return null;
-    } catch (error) {
-      console.error('Ошибка поиска UUID:', error);
-      return null;
-    }
-  };
 
   // Подключение к устройству
   const connectToDevice = useCallback(
-    async (deviceId: string, deviceName?: string) => {
+    async (deviceId: string) => {
       try {
-        console.log(`=== ПОДКЛЮЧЕНИЕ К УСТРОЙСТВУ ${deviceId} ===`);
-        setStatus(`Подключение к ${deviceName || deviceId}...`);
+        console.log(`=== ПОДКЛЮЧЕНИЕ К ${deviceId} ===`);
+        setStatus(`Подключение к ${deviceId.slice(-4)}...`);
 
-        // Подключение к устройству
-        console.log('1. Подключение...');
         await BleManager.connect(deviceId);
         console.log('Подключено к устройству');
 
-        // Поиск рабочих UUID
-        console.log('2. Поиск сервисов...');
-        const workingUUIDs = await findWorkingUUIDs(deviceId);
-
-        if (!workingUUIDs) {
-          throw new Error('Не удалось найти совместимые сервисы UART');
-        }
-
-        // Сохраняем рабочие UUID
-        setCurrentServiceUUID(workingUUIDs.service);
-        setCurrentRxUUID(workingUUIDs.rx);
-        setCurrentTxUUID(workingUUIDs.tx);
-
-        console.log('3. Включение уведомлений...');
-        // Включаем уведомления для TX характеристики (получение данных)
-        await BleManager.startNotification(
-          deviceId,
-          workingUUIDs.service,
-          workingUUIDs.tx,
-        );
-        console.log('Уведомления включены');
-
         setConnectedDevice(deviceId);
         setIsConnected(true);
-        setStatus(`Подключено к ${deviceName || deviceId}`);
+        setStatus(`Подключено к ${deviceId.slice(-4)}`);
         startPulseAnimation();
 
-        // Инициализация ELM327 через небольшую задержку
+        // Получаем сервисы
+        console.log('Получение сервисов...');
+        const services = await BleManager.retrieveServices(deviceId);
+        console.log('Сервисы устройства:', JSON.stringify(services, null, 2));
+
+        setResponses(current => [
+          ...current,
+          `✅ Подключено к ${deviceId.slice(-4)}`,
+          `📋 Найдено сервисов: ${services.services?.length || 0}`,
+        ]);
+
+        // Автоматическая инициализация ELM327
         setTimeout(() => {
           initializeELM327();
         }, 2000);
-
-        Alert.alert('Успех!', `Подключено к ${deviceName || deviceId}`);
       } catch (error) {
         console.error('Ошибка подключения:', error);
         setStatus(`Ошибка подключения: ${error.message}`);
@@ -595,77 +481,89 @@ const OBDScannerScreen: React.FC = () => {
 
   // Отключение от устройства
   const disconnectDevice = useCallback(async () => {
-    if (connectedDevice) {
-      try {
-        console.log('=== ОТКЛЮЧЕНИЕ ===');
+    if (!connectedDevice) return;
 
-        // Остановка уведомлений
-        if (currentServiceUUID && currentTxUUID) {
-          await BleManager.stopNotification(
-            connectedDevice,
-            currentServiceUUID,
-            currentTxUUID,
-          );
-        }
+    try {
+      console.log(`=== ОТКЛЮЧЕНИЕ ОТ ${connectedDevice} ===`);
+      await BleManager.disconnect(connectedDevice);
 
-        // Отключение
-        await BleManager.disconnect(connectedDevice);
+      setConnectedDevice(null);
+      setIsConnected(false);
+      setStatus('Отключено');
+      stopPulseAnimation();
 
-        setConnectedDevice(null);
-        setIsConnected(false);
-        setStatus('Отключено');
-        setResponses([]);
-        setCurrentServiceUUID('');
-        setCurrentRxUUID('');
-        setCurrentTxUUID('');
+      setResponses(current => [
+        ...current,
+        `❌ Отключено от ${connectedDevice.slice(-4)}`,
+      ]);
 
-        pulseAnimation.stopAnimation();
-        pulseAnimation.setValue(1);
-
-        Alert.alert('Успех', 'Устройство отключено');
-      } catch (error) {
-        console.error('Ошибка отключения:', error);
-        Alert.alert('Ошибка', 'Не удалось отключиться');
-      }
+      console.log('Отключено от устройства');
+    } catch (error) {
+      console.error('Ошибка отключения:', error);
+      setResponses(current => [
+        ...current,
+        `❌ Ошибка отключения: ${error.message}`,
+      ]);
     }
-  }, [connectedDevice, currentServiceUUID, currentTxUUID, pulseAnimation]);
+  }, [connectedDevice, stopPulseAnimation]);
 
   // Отправка команды напрямую
   const sendCommandDirect = useCallback(
-    async (cmd: string): Promise<void> => {
-      if (!connectedDevice || !currentServiceUUID || !currentRxUUID) {
-        throw new Error('Устройство не подключено или UUID не определены');
+    async (cmd: string) => {
+      if (!connectedDevice) {
+        throw new Error('Нет подключения к устройству');
       }
 
       try {
-        const commandWithCR = cmd.trim() + '\r';
-        const data = Array.from(commandWithCR, char => char.charCodeAt(0));
-
         console.log(`Отправка команды: ${cmd}`);
-        await BleManager.write(
-          connectedDevice,
-          currentServiceUUID,
-          currentRxUUID,
-          data,
-        );
-        console.log(`Команда отправлена: ${cmd}`);
+
+        // Пробуем найти подходящие характеристики для записи
+        for (const serviceUUID of POSSIBLE_SERVICE_UUIDS) {
+          for (const charUUID of POSSIBLE_WRITE_CHARACTERISTICS) {
+            try {
+              const command = cmd + '\r';
+              const data = Array.from(command).map(char => char.charCodeAt(0));
+
+              await BleManager.write(
+                connectedDevice,
+                serviceUUID,
+                charUUID,
+                data,
+              );
+              console.log(
+                `✅ Команда отправлена через ${serviceUUID}/${charUUID}`,
+              );
+              return;
+            } catch (writeError) {
+              console.log(
+                `Не удалось отправить через ${serviceUUID}/${charUUID}:`,
+                writeError.message,
+              );
+            }
+          }
+        }
+
+        throw new Error('Не найдена подходящая характеристика для записи');
       } catch (error) {
         console.error('Ошибка отправки команды:', error);
         throw error;
       }
     },
-    [connectedDevice, currentServiceUUID, currentRxUUID],
+    [connectedDevice],
   );
 
   // Инициализация ELM327
   const initializeELM327 = useCallback(async () => {
-    if (!connectedDevice) return;
+    if (!connectedDevice) {
+      Alert.alert('Ошибка', 'Нет подключения к устройству');
+      return;
+    }
 
     try {
       console.log('=== ИНИЦИАЛИЗАЦИЯ ELM327 ===');
       setResponses(current => [...current, '🔧 Инициализация ELM327...']);
 
-      // Последовательность команд инициализации
+      // Базовые команды инициализации ELM327
       const initCommands = [
         'ATZ', // Сброс
         'ATE0', // Отключить эхо
@@ -673,26 +571,15 @@ const OBDScannerScreen: React.FC = () => {
         'ATS0', // Отключить пробелы
         'ATH1', // Включить заголовки
         'ATSP0', // Автоматический протокол
-        'ATRV', // Проверить напряжение
       ];
 
-      for (let i = 0; i < initCommands.length; i++) {
-        const cmd = initCommands[i];
+      for (const cmd of initCommands) {
+        await sendCommandDirect(cmd);
+        await new Promise(resolve => setTimeout(resolve, 500));
         setResponses(current => [...current, `> ${cmd}`]);
-
-        try {
-          await sendCommandDirect(cmd);
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          setResponses(current => [...current, `✅ ${cmd} - OK`]);
-        } catch (error) {
-          setResponses(current => [
-            ...current,
-            `❌ ${cmd} - ERROR: ${error.message}`,
-          ]);
-        }
       }
 
-      setResponses(current => [...current, '🎉 ELM327 инициализирован!']);
+      setResponses(current => [...current, '✅ ELM327 инициализирован']);
       setStatus('ELM327 готов к работе');
     } catch (error) {
       console.error('Ошибка инициализации ELM327:', error);
@@ -741,7 +628,10 @@ const OBDScannerScreen: React.FC = () => {
   const sendQuickCommand = useCallback(
     (cmd: string) => {
       setCommand(cmd);
-      sendCommand();
+      // Автоматически отправляем команду
+      setTimeout(() => {
+        sendCommand();
+      }, 100);
     },
     [sendCommand],
   );
@@ -769,67 +659,100 @@ const OBDScannerScreen: React.FC = () => {
   // Рендер элемента устройства
   const renderDevice = ({ item }: { item: BluetoothDevice }) => (
     <TouchableOpacity
-      style={styles.deviceItem}
-      onPress={() => connectToDevice(item.id, item.name)}
+      style={[
+        styles.deviceItem,
+        connectedDevice === item.id && styles.connectedDevice,
+      ]}
+      onPress={() => connectToDevice(item.id)}
     >
       <View style={styles.deviceInfo}>
-        <Text style={styles.deviceName}>
-          {item.name || 'Неизвестное устройство'}
-        </Text>
+        <Text style={styles.deviceName}>{item.name}</Text>
         <Text style={styles.deviceId}>ID: {item.id}</Text>
         {item.rssi && (
-          <Text style={styles.deviceRssi}>RSSI: {item.rssi} dBm</Text>
+          <Text style={styles.deviceRssi}>Сигнал: {item.rssi} dBm</Text>
         )}
       </View>
-      <Text style={styles.connectIcon}>📱</Text>
+      <Text style={styles.deviceIcon}>
+        {connectedDevice === item.id ? '🔗' : '📱'}
+      </Text>
+    </TouchableOpacity>
+  );
+
+  // Рендер элемента ответа
+  const renderResponse = ({ item }: { item: string }) => (
+    <Text style={styles.responseText}>{item}</Text>
+  );
+
+  // Рендер быстрой команды
+  const renderQuickCommand = ({ item }: { item: any }) => (
+    <TouchableOpacity
+      style={styles.quickCommand}
+      onPress={() => sendQuickCommand(item.cmd)}
+      disabled={!isConnected}
+    >
+      <Text style={styles.quickCommandIcon}>{item.icon}</Text>
+      <Text style={styles.quickCommandTitle}>{item.title}</Text>
+      <Text style={styles.quickCommandCmd}>{item.cmd}</Text>
     </TouchableOpacity>
   );
 
   return (
     <SafeAreaView style={styles.container}>
       <KeyboardAwareScrollView style={styles.scrollView}>
-        {/* Заголовок и статус */}
-        <View style={styles.header}>
-          <Text style={styles.title}>🚗 OBD2 ELM327 Scanner</Text>
+        {/* Статус */}
+        <View style={styles.statusContainer}>
           <Animated.View
             style={[
-              styles.statusContainer,
-              isConnected && { transform: [{ scale: pulseAnimation }] },
+              styles.statusIndicator,
+              {
+                backgroundColor: isConnected
+                  ? '#4CAF50'
+                  : isScanning
+                  ? '#FF9800'
+                  : '#757575',
+                transform: [{ scale: isConnected ? pulseAnimation : 1 }],
+              },
             ]}
-          >
-            <Text
-              style={[styles.status, isConnected && styles.connectedStatus]}
-            >
-              {isConnected ? '🟢' : '🔴'} {status}
-            </Text>
-          </Animated.View>
+          />
+          <Text style={styles.statusText}>{status}</Text>
         </View>
 
-        {/* Кнопки управления */}
-        <View style={styles.controlsContainer}>
+        {/* Управление */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Управление</Text>
+
           <ActionButton
-            title={isScanning ? 'Остановить' : 'Сканировать'}
+            title="Инициализировать BLE"
+            icon="🔄"
+            onPress={initializeBLE}
+            variant="secondary"
+          />
+
+          <ActionButton
+            title={
+              isScanning ? 'Остановить сканирование' : 'Начать сканирование'
+            }
             icon={isScanning ? '⏹️' : '🔍'}
             onPress={startScan}
             variant="primary"
           />
 
-          {isConnected && (
+          {connectedDevice && (
             <ActionButton
-              title="Отключить"
-              icon="🔌"
+              title="Отключиться"
+              icon="❌"
               onPress={disconnectDevice}
               variant="danger"
             />
           )}
         </View>
 
-        {/* Список устройств */}
-        {devices.length > 0 && (
-          <View style={styles.devicesContainer}>
-            <Text style={styles.sectionTitle}>
-              📱 Найденные устройства ({devices.length})
-            </Text>
+        {/* Устройства */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>
+            Найденные устройства ({devices.length})
+          </Text>
+          {devices.length > 0 ? (
             <FlatList
               data={devices}
               renderItem={renderDevice}
@@ -837,33 +760,34 @@ const OBDScannerScreen: React.FC = () => {
               style={styles.devicesList}
               scrollEnabled={false}
             />
-          </View>
-        )}
+          ) : (
+            <Text style={styles.emptyText}>
+              {isScanning
+                ? 'Поиск устройств...'
+                : 'Нажмите "Начать сканирование"'}
+            </Text>
+          )}
+        </View>
 
         {/* Быстрые команды */}
         {isConnected && (
-          <View style={styles.quickCommandsContainer}>
-            <Text style={styles.sectionTitle}>⚡ Быстрые команды</Text>
-            <View style={styles.quickCommandsGrid}>
-              {quickCommands.map((item, index) => (
-                <TouchableOpacity
-                  key={index}
-                  style={styles.quickCommandButton}
-                  onPress={() => sendQuickCommand(item.cmd)}
-                >
-                  <Text style={styles.quickCommandIcon}>{item.icon}</Text>
-                  <Text style={styles.quickCommandText}>{item.title}</Text>
-                  <Text style={styles.quickCommandCode}>{item.cmd}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Быстрые команды</Text>
+            <FlatList
+              data={quickCommands}
+              renderItem={renderQuickCommand}
+              keyExtractor={item => item.cmd}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.quickCommandsList}
+            />
           </View>
         )}
 
         {/* Ввод команды */}
         {isConnected && (
-          <View style={styles.commandContainer}>
-            <Text style={styles.sectionTitle}>💻 Отправка команд</Text>
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Отправка команды</Text>
             <View style={styles.commandInputContainer}>
               <TextInput
                 style={styles.commandInput}
@@ -871,33 +795,35 @@ const OBDScannerScreen: React.FC = () => {
                 onChangeText={setCommand}
                 placeholder="Введите OBD команду (например: 01 00)"
                 placeholderTextColor="#999"
-                autoCapitalize="characters"
               />
-              <TouchableOpacity style={styles.sendButton} onPress={sendCommand}>
+              <TouchableOpacity
+                style={styles.sendButton}
+                onPress={sendCommand}
+                disabled={!command.trim()}
+              >
                 <Text style={styles.sendButtonText}>📤</Text>
               </TouchableOpacity>
             </View>
           </View>
         )}
 
-        {/* Лог ответов */}
+        {/* Ответы */}
         {responses.length > 0 && (
-          <View style={styles.responsesContainer}>
+          <View style={styles.section}>
             <View style={styles.responsesHeader}>
-              <Text style={styles.sectionTitle}>📋 Лог команд</Text>
-              <TouchableOpacity
-                style={styles.clearButton}
-                onPress={clearResponses}
-              >
-                <Text style={styles.clearButtonText}>🗑️ Очистить</Text>
+              <Text style={styles.sectionTitle}>Логи ({responses.length})</Text>
+              <TouchableOpacity onPress={clearResponses}>
+                <Text style={styles.clearButton}>🗑️ Очистить</Text>
               </TouchableOpacity>
             </View>
-            <View style={styles.responsesContent}>
-              {responses.map((response, index) => (
-                <Text key={index} style={styles.response}>
-                  {response}
-                </Text>
-              ))}
+            <View style={styles.responsesContainer}>
+              <FlatList
+                data={responses}
+                renderItem={renderResponse}
+                keyExtractor={(item, index) => index.toString()}
+                style={styles.responsesList}
+                scrollEnabled={false}
+              />
             </View>
           </View>
         )}
@@ -913,45 +839,55 @@ const styles = StyleSheet.create({
   },
   scrollView: {
     flex: 1,
-  },
-  header: {
-    padding: 20,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e0e0e0',
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    textAlign: 'center',
-    color: '#333',
-    marginBottom: 10,
+    padding: 16,
   },
   statusContainer: {
-    alignItems: 'center',
-  },
-  status: {
-    fontSize: 16,
-    color: '#666',
-    textAlign: 'center',
-  },
-  connectedStatus: {
-    color: '#4CAF50',
-    fontWeight: 'bold',
-  },
-  controlsContainer: {
     flexDirection: 'row',
-    padding: 20,
-    gap: 10,
+    alignItems: 'center',
+    backgroundColor: 'white',
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 16,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  statusIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 12,
+  },
+  statusText: {
+    fontSize: 16,
+    fontWeight: '500',
+    flex: 1,
+  },
+  section: {
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 12,
+    color: '#333',
   },
   actionButton: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    padding: 15,
-    borderRadius: 10,
-    gap: 8,
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 8,
   },
   primaryButton: {
     backgroundColor: '#2196F3',

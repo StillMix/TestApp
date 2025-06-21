@@ -45,10 +45,11 @@
   <string>Приложению требуется доступ к местоположению для работы с Bluetooth устройствами</string>
   
   <!-- ФОНОВЫЕ РЕЖИМЫ ДЛЯ BLUETOOTH -->
-  <key>UIBackgroundModes</key>
-  <array>
-    <string>bluetooth-central</string>
-  </array>
+<key>UIBackgroundModes</key>
+<array>
+  <string>bluetooth-central</string>
+  <string>bluetooth-peripheral</string>
+</array>
   
   <!-- ТРЕБУЕМЫЕ ВОЗМОЖНОСТИ УСТРОЙСТВА -->
   <key>UIRequiredDeviceCapabilities</key>
