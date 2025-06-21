@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,11 +8,11 @@ import {
   TextInput,
   Alert,
   FlatList,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface MaintenanceItem {
   id: string;
@@ -102,10 +102,10 @@ const AddMaintenanceModal: React.FC<AddMaintenanceModalProps> = ({
       name: customName || serviceType.name,
       icon: serviceType.icon,
       intervalKm: customInterval
-        ? parseInt(customInterval)
+        ? parseInt(customInterval, 10)
         : serviceType.intervalKm,
-      currentMileage: parseInt(currentMileageVal),
-      lastServiceMileage: parseInt(lastServiceMileage),
+      currentMileage: parseInt(currentMileageVal, 10),
+      lastServiceMileage: parseInt(lastServiceMileage, 10),
     };
 
     onAdd(newItem);
@@ -130,7 +130,7 @@ const AddMaintenanceModal: React.FC<AddMaintenanceModalProps> = ({
 
         <KeyboardAwareScrollView
           style={styles.modalContent}
-          contentContainerStyle={{ flexGrow: 1 }}
+          contentContainerStyle={styles.modalContentContainer}
           enableAutomaticScroll={true}
           enableOnAndroid={true}
           extraScrollHeight={100}
@@ -149,7 +149,7 @@ const AddMaintenanceModal: React.FC<AddMaintenanceModalProps> = ({
               onPress={() => setSelectedType(service.type)}
             >
               <Text style={styles.serviceIcon}>{service.icon}</Text>
-              <View style={{ flex: 1 }}>
+              <View style={styles.serviceDetails}>
                 <Text style={styles.serviceName}>{service.name}</Text>
                 <Text style={styles.serviceInterval}>
                   Интервал: {service.intervalKm.toLocaleString()} км
@@ -207,7 +207,6 @@ const AddMaintenanceModal: React.FC<AddMaintenanceModalProps> = ({
 };
 
 const CarKeeperScreen: React.FC = () => {
-  const insets = useSafeAreaInsets();
   const [maintenanceItems, setMaintenanceItems] = useState<MaintenanceItem[]>(
     [],
   );
@@ -217,11 +216,7 @@ const CarKeeperScreen: React.FC = () => {
   const [tempMileage, setTempMileage] = useState('');
 
   // Загрузка данных
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const itemsData = await AsyncStorage.getItem('maintenanceItems');
       const mileageData = await AsyncStorage.getItem('currentMileage');
@@ -235,12 +230,16 @@ const CarKeeperScreen: React.FC = () => {
       }
 
       if (mileageData) {
-        setCurrentMileage(parseInt(mileageData));
+        setCurrentMileage(parseInt(mileageData, 10));
       }
     } catch (error) {
       console.log('Ошибка загрузки данных:', error);
     }
-  };
+  }, [currentMileage]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const saveData = async (items: MaintenanceItem[], mileage: number) => {
     try {
@@ -269,7 +268,7 @@ const CarKeeperScreen: React.FC = () => {
   };
 
   const updateMileage = () => {
-    const newMileage = parseInt(tempMileage);
+    const newMileage = parseInt(tempMileage, 10);
     if (isNaN(newMileage) || newMileage < 0) {
       Alert.alert('Ошибка', 'Введите корректный пробег');
       return;
@@ -307,80 +306,78 @@ const CarKeeperScreen: React.FC = () => {
     );
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'good':
-        return '#00ff88';
-      case 'warning':
-        return '#ffaa00';
-      case 'overdue':
-        return '#ff4444';
-      default:
-        return '#666';
-    }
+  const markAsCompleted = (id: string) => {
+    const item = maintenanceItems.find(i => i.id === id);
+    if (!item) return;
+
+    const updatedItem: MaintenanceItem = {
+      ...item,
+      lastServiceMileage: currentMileage,
+      nextServiceMileage: currentMileage + item.intervalKm,
+      status: 'good',
+    };
+
+    const updatedItems = maintenanceItems.map(i =>
+      i.id === id ? updatedItem : i,
+    );
+
+    setMaintenanceItems(updatedItems);
+    saveData(updatedItems, currentMileage);
+    Alert.alert('Успех', 'Обслуживание отмечено как выполненное');
   };
 
-  const getStatusText = (item: MaintenanceItem) => {
-    const remaining = item.nextServiceMileage - currentMileage;
-    if (remaining < 0) {
-      return `Просрочено на ${Math.abs(remaining).toLocaleString()} км`;
-    }
-    return `Осталось: ${remaining.toLocaleString()} км`;
+  const renderMaintenanceItem = ({ item }: { item: MaintenanceItem }) => {
+    const getStatusColor = () => {
+      switch (item.status) {
+        case 'overdue':
+          return '#ff4444';
+        case 'warning':
+          return '#ffaa00';
+        default:
+          return '#00ff88';
+      }
+    };
+
+    const remainingKm = item.nextServiceMileage - currentMileage;
+
+    return (
+      <View
+        style={[styles.maintenanceItem, { borderLeftColor: getStatusColor() }]}
+      >
+        <View style={styles.maintenanceHeader}>
+          <Text style={styles.maintenanceIcon}>{item.icon}</Text>
+          <View style={styles.maintenanceContent}>
+            <Text style={styles.maintenanceName}>{item.name}</Text>
+            <Text style={styles.maintenanceStatus}>
+              {remainingKm > 0
+                ? `Через ${remainingKm.toLocaleString()} км`
+                : `Просрочено на ${Math.abs(remainingKm).toLocaleString()} км`}
+            </Text>
+          </View>
+          <View style={styles.maintenanceActions}>
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => markAsCompleted(item.id)}
+            >
+              <Text style={styles.actionButtonText}>✓</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.actionButton, styles.deleteButton]}
+              onPress={() => deleteItem(item.id)}
+            >
+              <Text style={styles.actionButtonText}>✕</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    );
   };
-
-  const renderMaintenanceItem = ({ item }: { item: MaintenanceItem }) => (
-    <View style={styles.maintenanceItem}>
-      <View style={styles.itemHeader}>
-        <Text style={styles.itemIcon}>{item.icon}</Text>
-        <View style={styles.itemInfo}>
-          <Text style={styles.itemName}>{item.name}</Text>
-          <Text style={styles.itemInterval}>
-            Интервал: {item.intervalKm.toLocaleString()} км
-          </Text>
-        </View>
-        <TouchableOpacity
-          style={styles.deleteButton}
-          onPress={() => deleteItem(item.id)}
-        >
-          <Text style={styles.deleteButtonText}>✕</Text>
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.itemStatus}>
-        <Text
-          style={[styles.statusText, { color: getStatusColor(item.status) }]}
-        >
-          {getStatusText(item)}
-        </Text>
-        <View style={styles.progressContainer}>
-          <View
-            style={[
-              styles.progressBar,
-              {
-                width: `${Math.max(
-                  0,
-                  Math.min(
-                    100,
-                    ((currentMileage - item.lastServiceMileage) /
-                      item.intervalKm) *
-                      100,
-                  ),
-                )}%`,
-                backgroundColor: getStatusColor(item.status),
-              },
-            ]}
-          />
-        </View>
-      </View>
-    </View>
-  );
 
   return (
     <SafeAreaView style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.title}>Car Keeper</Text>
-
         <View style={styles.mileageContainer}>
           {editMileageMode ? (
             <View style={styles.mileageEditContainer}>
@@ -453,7 +450,7 @@ const CarKeeperScreen: React.FC = () => {
             renderItem={renderMaintenanceItem}
             keyExtractor={item => item.id}
             style={styles.maintenanceList}
-            scrollEnabled={false} // Отключаем скролл у FlatList
+            scrollEnabled={false}
           />
         )}
       </KeyboardAwareScrollView>
@@ -591,83 +588,72 @@ const styles = StyleSheet.create({
     lineHeight: 24,
   },
   maintenanceList: {
-    flexGrow: 0,
+    flex: 1,
   },
   maintenanceItem: {
     backgroundColor: '#1a1a1a',
     borderRadius: 15,
-    padding: 20,
     marginBottom: 15,
-    borderWidth: 1,
-    borderColor: '#333',
+    borderLeftWidth: 4,
+    overflow: 'hidden',
   },
-  itemHeader: {
+  maintenanceHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 15,
+    padding: 20,
   },
-  itemIcon: {
+  maintenanceIcon: {
     fontSize: 30,
     marginRight: 15,
   },
-  itemInfo: {
+  maintenanceContent: {
     flex: 1,
   },
-  itemName: {
+  maintenanceName: {
     color: '#ffffff',
     fontSize: 18,
-    fontWeight: 'bold',
+    fontWeight: '600',
     marginBottom: 5,
   },
-  itemInterval: {
+  maintenanceStatus: {
     color: '#888',
     fontSize: 14,
   },
-  deleteButton: {
-    backgroundColor: '#ff4444',
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+  maintenanceActions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  actionButton: {
+    backgroundColor: '#00ff88',
+    width: 35,
+    height: 35,
+    borderRadius: 17.5,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  deleteButtonText: {
+  deleteButton: {
+    backgroundColor: '#ff4444',
+  },
+  actionButtonText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
   },
-  itemStatus: {
-    gap: 10,
-  },
-  statusText: {
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  progressContainer: {
-    height: 8,
-    backgroundColor: '#333',
-    borderRadius: 4,
-    overflow: 'hidden',
-  },
-  progressBar: {
-    height: '100%',
-    borderRadius: 4,
-  },
   fab: {
     position: 'absolute',
-    right: 20,
-    bottom: 20,
+    bottom: 30,
+    right: 30,
     width: 60,
     height: 60,
     borderRadius: 30,
     backgroundColor: '#00ff88',
     justifyContent: 'center',
     alignItems: 'center',
-    elevation: 5,
+    elevation: 8,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4.65,
   },
   fabText: {
     color: '#000',
@@ -701,6 +687,9 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: 20,
   },
+  modalContentContainer: {
+    flexGrow: 1,
+  },
   sectionTitle: {
     color: '#00ff88',
     fontSize: 16,
@@ -724,6 +713,9 @@ const styles = StyleSheet.create({
   serviceIcon: {
     fontSize: 20,
     marginRight: 15,
+  },
+  serviceDetails: {
+    flex: 1,
   },
   serviceName: {
     color: '#ffffff',
